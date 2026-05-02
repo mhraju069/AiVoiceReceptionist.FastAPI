@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from database import Base
 from models.auth_models import User
@@ -12,11 +12,12 @@ def main():
 
     db_urls = [
         "postgresql://postgres:postgres@localhost:5432/vocaai",
-        "postgresql://postgres:postgres@db:5432/vocaai",
-        os.getenv("DATABASE_URL", "sqlite:///./voca.db")
+        "postgresql://postgres:postgres@db:5432/vocaai"
     ]
 
     engine = None
+    last_error = None
+    
     for url in db_urls:
         try:
             test_engine = create_engine(url)
@@ -24,13 +25,27 @@ def main():
                 pass
             engine = test_engine
             break
-        except Exception:
+        except Exception as e:
+            last_error = e
             continue
 
     if not engine:
-        print("Error: Could not connect to any database.")
-        print("Ensure PostgreSQL is running inside your Docker container.")
+        print("\nError: Could not connect to the PostgreSQL database.")
+        print(f"Details of the error: {last_error}")
+        print("\nPlease ensure that:")
+        print("1. Your PostgreSQL Docker container is running.")
+        print("2. You have 'psycopg2' or 'psycopg2-binary' installed on your local host Python.")
+        print("   To install it, run: pip install psycopg2-binary\n")
         return
+
+    # Automatically add missing columns if using psql
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS otp VARCHAR;"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_expires_at TIMESTAMP;"))
+            conn.commit()
+        except Exception:
+            pass
 
     # Create all tables if they do not exist
     Base.metadata.create_all(bind=engine)
@@ -115,7 +130,7 @@ def main():
                 return
 
             confirm = input(f"Are you sure you want to delete the user '{email}'? (yes/no): ").strip().lower()
-            if confirm == 'yes' or confirm == 'y' or confirm == 'Y':
+            if confirm == 'yes' or confirm == 'y':
                 db.delete(user)
                 db.commit()
                 print(f"\nSuccess: User '{email}' has been deleted from the database!")
