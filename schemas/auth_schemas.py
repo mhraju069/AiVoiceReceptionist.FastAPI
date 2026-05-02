@@ -25,3 +25,11 @@ class UserRegisterResponse(Token):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+
+class OTPRequest(BaseModel):
+    email: EmailStr
+
+class ChangePasswordWithOTP(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str

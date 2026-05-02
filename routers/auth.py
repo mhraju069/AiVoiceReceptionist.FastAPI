@@ -1,9 +1,11 @@
+import random
+import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from database import get_db
 from models.auth_models import User
-from schemas.auth_schemas import UserCreate, UserResponse, Token, UserRegisterResponse
+from schemas.auth_schemas import UserCreate, UserResponse, Token, UserRegisterResponse, OTPRequest, ChangePasswordWithOTP
 from utils.auth_utils import get_password_hash, verify_password, create_access_token, decode_access_token
 
 router = APIRouter(
@@ -107,3 +109,53 @@ def login_user_json(user_in: UserCreate, db: Session = Depends(get_db)):
 def get_me(current_user: User = Depends(get_current_user)):
     """Fetch profile details of the logged in user."""
     return current_user
+
+
+@router.post("/send-otp")
+def send_otp(otp_in: OTPRequest, db: Session = Depends(get_db)):
+    """Generate and send an OTP for password reset."""
+    user = db.query(User).filter(User.email == otp_in.email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Email not registered"
+        )
+    
+    otp = str(random.randint(100000, 999999))
+    user.otp = otp
+    user.otp_expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=10)
+    db.commit()
+    db.refresh(user)
+    
+    return {"message": "OTP generated and sent successfully to email", "otp": otp}
+
+
+@router.post("/reset-password-with-otp")
+def reset_password_with_otp(change_in: ChangePasswordWithOTP, db: Session = Depends(get_db)):
+    """Verify OTP and reset the user's password."""
+    user = db.query(User).filter(User.email == change_in.email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Email not registered"
+        )
+        
+    if not user.otp or user.otp != change_in.otp:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid OTP"
+        )
+        
+    if not user.otp_expires_at or user.otp_expires_at < datetime.datetime.utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP has expired"
+        )
+        
+    user.hashed_password = get_password_hash(change_in.new_password)
+    user.otp = None
+    user.otp_expires_at = None
+    db.commit()
+    db.refresh(user)
+    
+    return {"message": "Password changed successfully!"}
