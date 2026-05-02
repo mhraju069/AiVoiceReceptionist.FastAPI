@@ -1,8 +1,6 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List, Dict, Any
 
-
-
 class ContactCreate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
@@ -18,8 +16,6 @@ class ContactCreate(BaseModel):
     timezone: Optional[str] = None
     tags: Optional[List[str]] = None
     source: Optional[str] = None
-
-
 
 class ContactUpdate(BaseModel):
     email: Optional[EmailStr] = None
@@ -37,8 +33,6 @@ class ContactUpdate(BaseModel):
     tags: Optional[List[str]] = None
     source: Optional[str] = None
 
-
-
 class AppointmentCreate(BaseModel):
     contactId: str
     calendarId: str
@@ -47,8 +41,6 @@ class AppointmentCreate(BaseModel):
     title: Optional[str] = None
     notes: Optional[str] = None
     status: Optional[str] = "booked" # "booked", "cancelled", etc.
-
-
 
 class AppointmentUpdate(BaseModel):
     selectedTimezone: Optional[str] = None

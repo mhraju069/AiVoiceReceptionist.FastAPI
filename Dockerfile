@@ -14,5 +14,5 @@ COPY . .
 # Expose the port Uvicorn will run on
 EXPOSE 8000
 
-# Start the FastAPI application
+# Start the FastAPI application with uvicorn
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -72,6 +72,8 @@ async def create_appointment(appointment: AppointmentCreate):
         else:
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
+
+
 async def update_appointment(appointment_id: str, appointment: AppointmentUpdate):
     url = f"{GHL_BASE_URL}/appointments/{appointment_id}"
     
