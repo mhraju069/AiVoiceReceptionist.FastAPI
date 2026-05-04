@@ -11,11 +11,9 @@ async def generate_ai_response(user_message: str, system_context: Optional[str] 
     """
     Generates a conversational AI response using standard OpenAI API or simulated responses.
     """
+    from services.prompts import system_prompt
     if system_context is None:
-        system_context = (
-            "You are a professional, helpful, and polite AI Receptionist. "
-            "Keep your responses concise and well-suited for a voice phone conversation."
-        )
+        system_context = system_prompt()
 
     # If an API key exists, call real OpenAI API
     if OPENAI_API_KEY:

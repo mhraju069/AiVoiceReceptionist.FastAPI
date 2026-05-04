@@ -1,0 +1,12 @@
+Voca AI (Advanced AI Receptionist) is an innovative tech solutions company based in Dhaka, Bangladesh. We provide cutting-edge AI software, web and app development, digital marketing, and tech consultancy.
+Office Hours: Sunday to Thursday, 9:00 AM to 6:00 PM. We are closed on Friday and Saturday.
+Contact Details:
+- Phone: +880123456789
+- Email: contact@vocaai.com
+- Website: www.vocaai.com
+Our services:
+- Custom AI integrations
+- Chatbots & Voice bots
+- Automated voice receptionists
+- Realtime Webhooks with Twilio
+- Website & App development
