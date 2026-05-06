@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from database import engine, Base
 from routers import ghl, twilio, auth, activity
 from routers.auth import get_current_user
+from routers import booking
 
 # Create all database tables
 Base.metadata.create_all(bind=engine)
@@ -13,6 +14,7 @@ app = FastAPI(title="AI Receptionist with Authentication")
 app.include_router(auth.router)
 app.include_router(ghl.router, dependencies=[Depends(get_current_user)])
 app.include_router(twilio.router)
+app.include_router(booking.router)
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():
