@@ -2,7 +2,7 @@
 Stripe service for creating payment links for new contacts.
 """
 import httpx
-from config import STRIPE_SECRET_KEY, STRIPE_PRICE_ID
+from config import STRIPE_SECRET_KEY
 
 
 async def create_stripe_payment_link(
@@ -20,8 +20,6 @@ async def create_stripe_payment_link(
     """
     if not STRIPE_SECRET_KEY:
         raise ValueError("STRIPE_SECRET_KEY not configured")
-    if not STRIPE_PRICE_ID:
-        raise ValueError("STRIPE_PRICE_ID not configured")
 
     url = "https://api.stripe.com/v1/checkout/sessions"
     headers = {
@@ -35,7 +33,9 @@ async def create_stripe_payment_link(
     data = {
         "mode": "payment",
         "customer_email": customer_email,
-        "line_items[0][price]": STRIPE_PRICE_ID,
+        "line_items[0][price_data][currency]": "usd",
+        "line_items[0][price_data][product_data][name]": "AI Receptionist Booking Fee",
+        "line_items[0][price_data][unit_amount]": "10000",  # $100.00 in cents
         "line_items[0][quantity]": "1",
         "success_url": "https://vocaai.com/booking-success?session_id={CHECKOUT_SESSION_ID}",
         "cancel_url": "https://vocaai.com/booking-cancelled",

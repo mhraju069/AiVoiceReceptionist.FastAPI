@@ -1,9 +1,11 @@
 from fastapi import FastAPI, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from database import engine, Base
 from routers import ghl, twilio, auth, activity
 from routers.auth import get_current_user
 from routers import booking
+from routers import demo
 
 # Create all database tables
 Base.metadata.create_all(bind=engine)
@@ -15,6 +17,14 @@ app.include_router(auth.router)
 app.include_router(ghl.router, dependencies=[Depends(get_current_user)])
 app.include_router(twilio.router)
 app.include_router(booking.router)
+app.include_router(demo.router)
+
+# Serve static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/demo")
+async def demo_page():
+    return FileResponse("static/demo.html")
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():

@@ -71,10 +71,15 @@ async def process_booking(req: BookingRequest):
         print(f"✅ [Booking] Existing contact found: {contact_id} ({contact_name})")
 
         # ── Step 2a: Book appointment in GHL ──────────────────────────────
+        # Ensure timezone matches the slot format (GHL requirement)
+        ghl_timezone = req.timezone
+        if req.booking_slot.endswith("Z"):
+            ghl_timezone = "UTC"
+
         appointment_data = AppointmentCreate(
             contactId=contact_id,
             calendarId=req.calendar_id,
-            selectedTimezone=req.timezone,
+            selectedTimezone=ghl_timezone,
             selectedSlot=req.booking_slot,
             title=req.title,
             notes=req.call_summary,

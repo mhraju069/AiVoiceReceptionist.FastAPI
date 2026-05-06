@@ -20,7 +20,7 @@ TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_WS_URL = os.getenv(
     "OPENAI_WS_URL", 
-    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
 )
 
 
@@ -151,7 +151,7 @@ async def twilio_stream(websocket: WebSocket):
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "OpenAI-Beta": "realtime=v1"
             }
-            openai_ws = await websockets.connect(OPENAI_WS_URL, extra_headers=headers)
+            openai_ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
             print("🟢 [OpenAI] Successfully connected to OpenAI Realtime API.")
 
             from services.prompts import system_prompt
@@ -174,7 +174,24 @@ async def twilio_stream(websocket: WebSocket):
                         "threshold": 0.5,
                         "prefix_padding_ms": 300,
                         "silence_duration_ms": 500
-                    }
+                    },
+                    "tools": [{
+                        "type": "function",
+                        "name": "book_appointment",
+                        "description": "Book an appointment for the caller. Call this ONLY after getting their name, email, phone, and requested time slot.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "email": {"type": "string"},
+                                "phone": {"type": "string"},
+                                "booking_slot": {"type": "string", "description": "ISO date format like 2026-06-10T10:00:00Z"},
+                                "call_summary": {"type": "string"}
+                            },
+                            "required": ["name", "email", "phone", "booking_slot", "call_summary"]
+                        }
+                    }],
+                    "tool_choice": "auto"
                 }
             }
             await openai_ws.send(json.dumps(session_update))
@@ -224,8 +241,17 @@ async def twilio_stream(websocket: WebSocket):
                         }
                         await openai_ws.send(json.dumps(openai_payload))
                     else:
-                        # Fallback/Mock - Echo or log the live audio input
-                        pass
+                        # Fallback/Mock - Echo back a tiny beep or silence to prove connection
+                        if media_count % 50 == 0:
+                            print(f"🛠️ [Mock Mode] Echoing dummy response for chunk {media_count}")
+                            mock_response = {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": payload # Echoing back user audio as a test
+                                }
+                            }
+                            await websocket.send_text(json.dumps(mock_response))
 
                 elif data.get("event") == "stop":
                     print(f"🛑 [Twilio -> Server] Media stream stopped. Total chunks: {media_count}")
@@ -275,6 +301,44 @@ async def twilio_stream(websocket: WebSocket):
                     user_text = openai_data.get("transcript")
                     if user_text:
                         print(f"\n👤 [Caller]: {user_text}")
+
+                # Handle tool calls
+                elif openai_data.get("type") == "response.function_call_arguments.done":
+                    func_name = openai_data.get("name")
+                    call_id = openai_data.get("call_id")
+                    args = json.loads(openai_data.get("arguments", "{}"))
+                    print(f"\n🛠️ [OpenAI] AI called tool '{func_name}' with args: {args}")
+                    
+                    if func_name == "book_appointment":
+                        import httpx
+                        if "calendar_id" not in args:
+                            args["calendar_id"] = "test_cal_id"
+                        
+                        try:
+                            async with httpx.AsyncClient() as client:
+                                resp = await client.post("http://127.0.0.1:8000/api/booking/process", json=args)
+                                result = resp.json()
+                                
+                                if resp.status_code >= 400:
+                                    print(f"🔴 [OpenAI] Booking API Error: {result}")
+                                    result = {"status": "error", "message": "Failed to book appointment. Please try again later."}
+                                else:
+                                    print(f"✅ [OpenAI] Booking tool result: {result.get('status', 'unknown')}")
+                        except Exception as e:
+                            result = {"status": "error", "message": str(e)}
+                            print(f"🔴 [OpenAI] Booking tool failed: {e}")
+                        
+                        # Send output back to OpenAI
+                        await openai_ws.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(result)
+                            }
+                        }))
+                        # Trigger response
+                        await openai_ws.send(json.dumps({"type": "response.create"}))
 
         except Exception as e:
             print(f"🔴 [OpenAI -> Twilio] Error streaming response from OpenAI to Twilio: {e}")
