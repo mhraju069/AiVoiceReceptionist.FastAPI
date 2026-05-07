@@ -64,6 +64,7 @@ def main():
         if choice == '1':
             print("\n--- Register a New User ---")
             email = input("Enter email address: ").strip()
+            name = input("Enter name: ").strip()
             password = input("Enter password: ").strip()
             confirm_password = input("Confirm password: ").strip()
             
@@ -83,6 +84,7 @@ def main():
             hashed_password = get_password_hash(password)
             new_user = User(
                 email=email,
+                name=name,
                 hashed_password=hashed_password
             )
             db.add(new_user)
