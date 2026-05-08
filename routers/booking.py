@@ -16,7 +16,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 from config import STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, GHL_LOCATION_ID
 from services.ghl_search import search_contact_by_phone_or_email
-from services.ghl import add_contact, create_appointment
+from services.ghl import add_contact, create_appointment, get_all_appointments
 from services.email_service import send_booking_confirmation, send_stripe_payment_link
 from services.stripe_service import create_stripe_payment_link
 from schemas import ContactCreate, AppointmentCreate
@@ -42,6 +42,67 @@ class BookingRequest(BaseModel):
 
 
 # ─────────────────────────────────────────────
+# Get Available Slots endpoint
+# ─────────────────────────────────────────────
+@router.get("/slots")
+async def get_slots(calendar_id: str, timezone: str = "Asia/Dhaka"):
+    import time
+    import httpx
+    from config import GHL_BASE_URL
+    from services.ghl import get_ghl_headers
+    
+    url = f"{GHL_BASE_URL}/appointments/slots"
+    now_ms = int(time.time() * 1000)
+    end_ms = now_ms + (7 * 24 * 60 * 60 * 1000) # Next 7 days
+    
+    params = {
+        "calendarId": calendar_id,
+        "startDate": now_ms,
+        "endDate": end_ms,
+        "timezone": timezone
+    }
+    
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, params=params, headers=get_ghl_headers())
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+# ─────────────────────────────────────────────
+# Get Appointments endpoint
+# ─────────────────────────────────────────────
+@router.get("/appointments")
+async def list_appointments(
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    specific_day: Optional[str] = None,   # e.g. "today" or "2026-05-11"
+    this_week: Optional[bool] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+):
+    """
+    List GHL appointments with optional filters.
+    - ?specific_day=today        → today's appointments
+    - ?specific_day=2026-05-11  → specific date
+    - ?this_week=true            → this week's appointments
+    - ?email=...&phone=...       → filter by contact
+    """
+    appointments = await get_all_appointments(
+        email=email,
+        phone=phone,
+        start_time=start_time,
+        end_time=end_time,
+        specific_day=specific_day,
+        this_week=this_week,
+    )
+    return {
+        "count": len(appointments),
+        "appointments": appointments,
+    }
+
+
+# ─────────────────────────────────────────────
 # Main booking endpoint
 # ─────────────────────────────────────────────
 @router.post("/process")
@@ -54,6 +115,8 @@ async def process_booking(req: BookingRequest):
     """
 
     print(f"\n📋 [Booking] Processing booking for phone={req.phone}, email={req.email}")
+    
+    final_booking_slot = req.booking_slot
 
     # ── Step 1: Search contact in GHL ──────────────────────────────────────
     existing_contact = await search_contact_by_phone_or_email(
@@ -73,14 +136,20 @@ async def process_booking(req: BookingRequest):
         # ── Step 2a: Book appointment in GHL ──────────────────────────────
         # Ensure timezone matches the slot format (GHL requirement)
         ghl_timezone = req.timezone
-        if req.booking_slot.endswith("Z"):
+        if final_booking_slot.endswith("Z"):
             ghl_timezone = "UTC"
+        elif "-04:00" in final_booking_slot:
+            ghl_timezone = "America/New_York"
+        elif "-05:00" in final_booking_slot:
+            ghl_timezone = "America/New_York"
+        elif "+06:00" in final_booking_slot:
+            ghl_timezone = "Asia/Dhaka"
 
         appointment_data = AppointmentCreate(
             contactId=contact_id,
             calendarId=req.calendar_id,
             selectedTimezone=ghl_timezone,
-            selectedSlot=req.booking_slot,
+            selectedSlot=final_booking_slot,
             title=req.title,
             notes=req.call_summary,
             status="booked",
@@ -91,12 +160,12 @@ async def process_booking(req: BookingRequest):
 
         # Parse slot for readable display
         try:
-            dt = datetime.fromisoformat(req.booking_slot.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(final_booking_slot.replace("Z", "+00:00"))
             booking_date = dt.strftime("%d %B %Y")
             booking_time = dt.strftime("%I:%M %p")
         except Exception:
-            booking_date = req.booking_slot[:10]
-            booking_time = req.booking_slot[11:16]
+            booking_date = final_booking_slot[:10]
+            booking_time = final_booking_slot[11:16]
 
         # ── Step 2b: Send confirmation email ──────────────────────────────
         await send_booking_confirmation(
@@ -117,7 +186,7 @@ async def process_booking(req: BookingRequest):
                 is_new=False,
                 name=contact_name,
                 email=str(req.email),
-                slot=req.booking_slot,
+                slot=final_booking_slot,
                 appointment_id=appointment_id,
                 call_summary=req.call_summary,
             ),
@@ -130,7 +199,7 @@ async def process_booking(req: BookingRequest):
         payment_url = await create_stripe_payment_link(
             customer_email=str(req.email),
             customer_name=req.name,
-            booking_slot=req.booking_slot,
+            booking_slot=final_booking_slot,
             call_summary=req.call_summary,
             calendar_id=req.calendar_id,
             customer_phone=req.phone,

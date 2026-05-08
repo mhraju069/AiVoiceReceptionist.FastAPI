@@ -6,6 +6,7 @@ from routers import ghl, twilio, auth, activity
 from routers.auth import get_current_user
 from routers import booking
 from routers import demo
+from routers import dashboard
 
 # Create all database tables
 Base.metadata.create_all(bind=engine)
@@ -18,6 +19,7 @@ app.include_router(ghl.router, dependencies=[Depends(get_current_user)])
 app.include_router(twilio.router)
 app.include_router(booking.router)
 app.include_router(demo.router)
+app.include_router(dashboard.router, dependencies=[Depends(get_current_user)])
 
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")

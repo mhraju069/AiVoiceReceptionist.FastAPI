@@ -96,14 +96,23 @@ async def get_all_appointments(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     specific_day: Optional[str] = None,
-    this_week: Optional[bool] = None
+    this_week: Optional[bool] = None,
+    calendar_id: Optional[str] = "4OIPAoMvrUMkcbRSyYiv"
 ):
     """
     Fetch all appointments from GoHighLevel and optionally filter by email, phone, 
     time range, specific day (or today), or this week.
     """
+    import time as _time
     url = f"{GHL_BASE_URL}/appointments/"
-    params = {"locationId": GHL_LOCATION_ID}
+    # GHL requires startDate and endDate (epoch ms). Default to 90-day window.
+    now_ms = int(_time.time() * 1000)
+    params = {
+        "locationId": GHL_LOCATION_ID,
+        "calendarId": calendar_id,
+        "startDate": now_ms - (30 * 24 * 60 * 60 * 1000),  # 30 days ago
+        "endDate": now_ms + (60 * 24 * 60 * 60 * 1000),    # 60 days ahead
+    }
     
     async with httpx.AsyncClient() as client:
         response = await client.get(url, params=params, headers=get_ghl_headers())
@@ -156,5 +165,45 @@ async def get_all_appointments(
                         continue
                     
             filtered_appointments.append(appt)
-            
-        return filtered_appointments
+        
+        # Enrich each appointment with full details (notes, title, contact + contact notes)
+        import asyncio
+        async def enrich(appt_summary):
+            appt_id = appt_summary.get("id")
+            merged = dict(appt_summary)
+            try:
+                # 1) Fetch full appointment detail
+                detail_resp = await client.get(
+                    f"{GHL_BASE_URL}/appointments/{appt_id}",
+                    headers=get_ghl_headers()
+                )
+                if detail_resp.status_code == 200:
+                    merged.update(detail_resp.json())
+
+                # 2) Fetch contact notes to surface AI call summary
+                contact_id = merged.get("contactId")
+                if contact_id:
+                    notes_resp = await client.get(
+                        f"{GHL_BASE_URL}/contacts/{contact_id}/notes",
+                        headers=get_ghl_headers()
+                    )
+                    if notes_resp.status_code == 200:
+                        all_notes = notes_resp.json().get("notes", [])
+                        # Find the AI booking note that matches this appointment
+                        ai_notes = [
+                            n for n in all_notes
+                            if appt_id in n.get("body", "")
+                            or "AI Receptionist Booking" in n.get("body", "")
+                        ]
+                        if ai_notes:
+                            # Use the most recent matching note
+                            latest_note = sorted(ai_notes, key=lambda x: x.get("dateAdded", ""), reverse=True)[0]
+                            merged["caller_summary"] = latest_note.get("body", "")
+                        # Also include all notes for full visibility
+                        merged["contact_notes"] = all_notes
+            except Exception:
+                pass
+            return merged
+        
+        enriched = await asyncio.gather(*[enrich(a) for a in filtered_appointments])
+        return list(enriched)

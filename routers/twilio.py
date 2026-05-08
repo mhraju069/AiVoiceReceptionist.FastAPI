@@ -171,26 +171,38 @@ async def twilio_stream(websocket: WebSocket):
                     # Auto-detect when the caller finishes speaking and trigger a response
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.5,
+                        "threshold": 0.7,
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500
+                        "silence_duration_ms": 600
                     },
-                    "tools": [{
-                        "type": "function",
-                        "name": "book_appointment",
-                        "description": "Book an appointment for the caller. Call this ONLY after getting their name, email, phone, and requested time slot.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "email": {"type": "string"},
-                                "phone": {"type": "string"},
-                                "booking_slot": {"type": "string", "description": "ISO date format like 2026-06-10T10:00:00Z"},
-                                "call_summary": {"type": "string"}
-                            },
-                            "required": ["name", "email", "phone", "booking_slot", "call_summary"]
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_available_slots",
+                            "description": "Fetch available booking slots for the next 7 days.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": []
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "book_appointment",
+                            "description": "Book an appointment for the caller. Call this ONLY after getting their name, email, phone, and requested time slot.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "email": {"type": "string"},
+                                    "phone": {"type": "string"},
+                                    "booking_slot": {"type": "string", "description": "ISO date format like 2026-06-10T10:00:00Z"},
+                                    "call_summary": {"type": "string"}
+                                },
+                                "required": ["name", "email", "phone", "booking_slot", "call_summary"]
+                            }
                         }
-                    }],
+                    ],
                     "tool_choice": "auto"
                 }
             }
@@ -310,35 +322,40 @@ async def twilio_stream(websocket: WebSocket):
                     print(f"\n🛠️ [OpenAI] AI called tool '{func_name}' with args: {args}")
                     
                     if func_name == "book_appointment":
-                        import httpx
-                        if "calendar_id" not in args:
-                            args["calendar_id"] = "test_cal_id"
-                        
+                        from services.booking_service import book_appointment
                         try:
-                            async with httpx.AsyncClient() as client:
-                                resp = await client.post("http://127.0.0.1:8000/api/booking/process", json=args)
-                                result = resp.json()
-                                
-                                if resp.status_code >= 400:
-                                    print(f"🔴 [OpenAI] Booking API Error: {result}")
-                                    result = {"status": "error", "message": "Failed to book appointment. Please try again later."}
-                                else:
-                                    print(f"✅ [OpenAI] Booking tool result: {result.get('status', 'unknown')}")
+                            result = await book_appointment(
+                                name=args.get("name", "Caller"),
+                                email=args.get("email", ""),
+                                phone=args.get("phone", ""),
+                                booking_slot=args.get("booking_slot", ""),
+                                call_summary=args.get("call_summary", ""),
+                            )
+                            print(f"✅ [OpenAI] Booking result: {result.get('status')}")
                         except Exception as e:
-                            result = {"status": "error", "message": str(e)}
-                            print(f"🔴 [OpenAI] Booking tool failed: {e}")
-                        
-                        # Send output back to OpenAI
-                        await openai_ws.send(json.dumps({
-                            "type": "conversation.item.create",
-                            "item": {
-                                "type": "function_call_output",
-                                "call_id": call_id,
-                                "output": json.dumps(result)
-                            }
-                        }))
-                        # Trigger response
-                        await openai_ws.send(json.dumps({"type": "response.create"}))
+                            result = {"status": "error", "message": "Sorry, there was a technical issue booking your appointment. Please try again later."}
+                            print(f"🔴 [OpenAI] Booking exception: {e}")
+                    
+                    elif func_name == "get_available_slots":
+                        from services.booking_service import get_slots
+                        try:
+                            result = await get_slots()
+                            print(f"✅ [OpenAI] Slots fetched successfully.")
+                        except Exception as e:
+                            result = {"status": "error", "message": "Could not fetch available slots."}
+                            print(f"🔴 [OpenAI] Slot fetch exception: {e}")
+                    
+                    # Send output back to OpenAI
+                    await openai_ws.send(json.dumps({
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps(result)
+                        }
+                    }))
+                    # Trigger response
+                    await openai_ws.send(json.dumps({"type": "response.create"}))
 
         except Exception as e:
             print(f"🔴 [OpenAI -> Twilio] Error streaming response from OpenAI to Twilio: {e}")
