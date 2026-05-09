@@ -12,7 +12,48 @@ from services.email_service import send_booking_confirmation, send_stripe_paymen
 from services.stripe_service import create_stripe_payment_link
 from schemas import ContactCreate, AppointmentCreate
 
-DEFAULT_CALENDAR_ID = "4OIPAoMvrUMkcbRSyYiv"
+# Calendar Definitions
+CALENDARS = {
+    "follow_up_c": {
+        "id": "NyTgTkNMmjyra19H68kT",
+        "name": "10 Min follow up call - C",
+        "price": 0, # Free for priority groups
+        "public": False
+    },
+    "follow_up_b": {
+        "id": "XGl4AFDSVEujEeFvAa1W",
+        "name": "10 Min follow up call B",
+        "price": 0,
+        "public": False
+    },
+    "virtual_consult_15": {
+        "id": "bLqGtiE32LFGiQZZ13b9",
+        "name": "Friday 15 Min Virtual Consult $",
+        "price": 50, # Example price
+        "public": True
+    },
+    "virtual_cpa_45": {
+        "id": "v19Df4NXDWvYk039RlnW",
+        "name": "45 Min SB Virtual CPA Consult - $",
+        "price": 150,
+        "public": True
+    },
+    "office_cpa_45": {
+        "id": "pbIEH8PjVBhZBtuvC2Or",
+        "name": "45 Min SB In-Office CPA Consult - $",
+        "price": 200,
+        "public": True
+    },
+    "test_calendar": {
+        "id": "4OIPAoMvrUMkcbRSyYiv",
+        "name": "Original Test Calendar",
+        "price": 0,
+        "public": True
+    }
+}
+
+DEFAULT_CALENDAR_ID = "XGl4AFDSVEujEeFvAa1W" # Follow up B as default
+PRIORITY_GROUPS = ["Group A", "Group B", "Group C", "Group D", "A", "B", "C", "D"]
 
 
 def _timezone_from_offset(slot: str, fallback: str = "Asia/Dhaka") -> str:
@@ -36,8 +77,11 @@ def _timezone_from_offset(slot: str, fallback: str = "Asia/Dhaka") -> str:
     return fallback
 
 
-async def get_slots(calendar_id: str = DEFAULT_CALENDAR_ID, timezone: str = "Asia/Dhaka") -> dict:
-    """Fetch available slots for the next 7 days from GHL."""
+async def get_slots(calendar_type: str = "follow_up_b", timezone: str = "Asia/Dhaka") -> dict:
+    """Fetch available slots for the next 7 days from GHL for a specific calendar."""
+    cal_config = CALENDARS.get(calendar_type, CALENDARS["follow_up_b"])
+    calendar_id = cal_config["id"]
+    
     url = f"{GHL_BASE_URL}/appointments/slots"
     now_ms = int(time.time() * 1000)
     end_ms = now_ms + (7 * 24 * 60 * 60 * 1000)
@@ -62,12 +106,16 @@ async def book_appointment(
     phone: str,
     booking_slot: str,
     call_summary: str,
-    calendar_id: str = DEFAULT_CALENDAR_ID,
+    calendar_type: str = "follow_up_b", # Default type
     timezone: str = "Asia/Dhaka",
 ) -> dict:
-    """Full booking flow: find/create contact, book slot, send email."""
-    print(f"\n📋 [BookingService] phone={phone}, email={email}, slot={booking_slot}")
+    """Full booking flow: find/create contact, check priority, book slot or request payment."""
+    print(f"\n📋 [BookingService] phone={phone}, email={email}, slot={booking_slot}, type={calendar_type}")
 
+    # Get calendar config
+    cal_config = CALENDARS.get(calendar_type, CALENDARS["follow_up_b"])
+    calendar_id = cal_config["id"]
+    
     ghl_timezone = _timezone_from_offset(booking_slot, fallback=timezone)
 
     # Step 1: Search existing contact
@@ -99,7 +147,45 @@ async def book_appointment(
     if not contact_id:
         return {"status": "error", "message": "Could not find or create a contact in GHL."}
 
-    # Step 2: Create appointment
+    # Step 2: Check if contact is in Priority Groups (A, B, C, D)
+    tags = existing_contact.get("tags", []) if existing_contact else []
+    # Normalize tags for comparison
+    normalized_tags = [t.strip().upper() for t in tags]
+    priority_check_tags = [g.strip().upper() for g in PRIORITY_GROUPS]
+    
+    is_priority = any(tag in priority_check_tags for tag in normalized_tags)
+    
+    # Pricing Logic
+    price = cal_config["price"]
+    
+    # NEW RULE: If client is in Group A, B, C, or D, EVERYTHING is free and direct.
+    if is_priority:
+        requires_payment = False
+        print(f"⭐ [BookingService] Priority client detected ({tags}). Direct booking enabled.")
+    else:
+        # For non-priority users, follow-ups are free (if configured), others need payment.
+        requires_payment = price > 0
+        if requires_payment:
+            print(f"💰 [BookingService] Non-priority client. Payment required: ${price}")
+    
+    if requires_payment:
+        print(f"🔗 [BookingService] Generating payment link for {email}...")
+        # Create Stripe link
+        payment_url = await create_stripe_payment_link(
+            customer_email=email,
+            customer_name=name,
+            booking_slot=booking_slot,
+            call_summary=call_summary,
+            calendar_id=calendar_id,
+            customer_phone=phone,
+        )
+        return {
+            "status": "payment_required",
+            "payment_url": payment_url,
+            "message": f"To confirm your booking, a payment of ${price} is required. I've sent a secure payment link to your email ({email})."
+        }
+
+    # Step 3: Create appointment (if free/direct)
     appointment_data = AppointmentCreate(
         contactId=contact_id,
         calendarId=calendar_id,

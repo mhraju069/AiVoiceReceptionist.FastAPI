@@ -131,8 +131,14 @@ async def demo_voice_stream(websocket: WebSocket):
                                 "description": "Fetch available booking slots for the next 7 days.",
                                 "parameters": {
                                     "type": "object",
-                                    "properties": {},
-                                    "required": []
+                                    "properties": {
+                                        "calendar_type": {
+                                            "type": "string", 
+                                            "enum": ["follow_up_c", "follow_up_b", "virtual_consult_15", "virtual_cpa_45", "office_cpa_45", "test_calendar"],
+                                            "description": "The type of meeting to check slots for"
+                                        }
+                                    },
+                                    "required": ["calendar_type"]
                                 }
                             },
                             {
@@ -146,9 +152,14 @@ async def demo_voice_stream(websocket: WebSocket):
                                         "email": {"type": "string"},
                                         "phone": {"type": "string"},
                                         "booking_slot": {"type": "string", "description": "ISO date format like 2026-06-10T10:00:00Z"},
+                                        "calendar_type": {
+                                            "type": "string", 
+                                            "enum": ["follow_up_c", "follow_up_b", "virtual_consult_15", "virtual_cpa_45", "office_cpa_45", "test_calendar"],
+                                            "description": "The type of meeting the user selected"
+                                        },
                                         "call_summary": {"type": "string"}
                                     },
-                                    "required": ["name", "email", "phone", "booking_slot", "call_summary"]
+                                    "required": ["name", "email", "phone", "booking_slot", "calendar_type", "call_summary"]
                                 }
                             }
                         ],
@@ -272,6 +283,7 @@ async def demo_voice_stream(websocket: WebSocket):
                                     email=args.get("email", ""),
                                     phone=args.get("phone", ""),
                                     booking_slot=args.get("booking_slot", ""),
+                                    calendar_type=args.get("calendar_type", "follow_up_b"),
                                     call_summary=args.get("call_summary", ""),
                                 )
                                 await _debug("tool_result", f"✅ Booking result: {result.get('status')}")
@@ -282,7 +294,9 @@ async def demo_voice_stream(websocket: WebSocket):
                         elif func_name == "get_available_slots":
                             from services.booking_service import get_slots
                             try:
-                                result = await get_slots()
+                                result = await get_slots(
+                                    calendar_type=args.get("calendar_type", "follow_up_b")
+                                )
                                 await _debug("tool_result", f"✅ Slots fetched successfully.")
                             except Exception as e:
                                 result = {"status": "error", "message": "Could not fetch available slots."}
