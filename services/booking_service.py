@@ -2,50 +2,60 @@
 Booking service - callable directly from WebSocket handlers.
 Avoids self-HTTP round-trips that can fail in Docker networking.
 """
+from config import (
+    GHL_BASE_URL, GHL_LOCATION_ID, 
+    CALENDAR_FOLLOW_UP_C, CALENDAR_FOLLOW_UP_B, 
+    CALENDAR_VIRTUAL_CONSULT_15, CALENDAR_VIRTUAL_CPA_45, 
+    CALENDAR_OFFICE_CPA_45, CALENDAR_BEAUTY_SALON_45, CALENDAR_TEST
+)
 import time
 import httpx
-from config import GHL_BASE_URL, GHL_LOCATION_ID
-from services.ghl import get_ghl_headers
+from services.ghl import get_ghl_headers, add_contact, update_contact, create_appointment
 from services.ghl_search import search_contact_by_phone_or_email
-from services.ghl import add_contact, create_appointment
 from services.email_service import send_booking_confirmation, send_stripe_payment_link
 from services.stripe_service import create_stripe_payment_link
-from schemas import ContactCreate, AppointmentCreate
+from schemas import ContactCreate, ContactUpdate, AppointmentCreate
 
 # Calendar Definitions
 CALENDARS = {
     "follow_up_c": {
-        "id": "NyTgTkNMmjyra19H68kT",
+        "id": CALENDAR_FOLLOW_UP_C or "NyTgTkNMmjyra19H68kT",
         "name": "10 Min follow up call - C",
         "price": 0, # Free for priority groups
         "public": False
     },
     "follow_up_b": {
-        "id": "XGl4AFDSVEujEeFvAa1W",
+        "id": CALENDAR_FOLLOW_UP_B or "XGl4AFDSVEujEeFvAa1W",
         "name": "10 Min follow up call B",
         "price": 0,
         "public": False
     },
     "virtual_consult_15": {
-        "id": "bLqGtiE32LFGiQZZ13b9",
+        "id": CALENDAR_VIRTUAL_CONSULT_15 or "bLqGtiE32LFGiQZZ13b9",
         "name": "Friday 15 Min Virtual Consult $",
         "price": 50, # Example price
         "public": True
     },
     "virtual_cpa_45": {
-        "id": "v19Df4NXDWvYk039RlnW",
+        "id": CALENDAR_VIRTUAL_CPA_45 or "v19Df4NXDWvYk039RlnW",
         "name": "45 Min SB Virtual CPA Consult - $",
         "price": 150,
         "public": True
     },
     "office_cpa_45": {
-        "id": "pbIEH8PjVBhZBtuvC2Or",
+        "id": CALENDAR_OFFICE_CPA_45 or "pbIEH8PjVBhZBtuvC2Or",
         "name": "45 Min SB In-Office CPA Consult - $",
         "price": 200,
         "public": True
     },
+    "beauty_salon_45": {
+        "id": CALENDAR_BEAUTY_SALON_45 or "5MlN78oRANJfHqsqTPCP",
+        "name": "Free Tax Consultation for Beauty Salons (45 Min)",
+        "price": 0,
+        "public": True
+    },
     "test_calendar": {
-        "id": "4OIPAoMvrUMkcbRSyYiv",
+        "id": CALENDAR_TEST or "4OIPAoMvrUMkcbRSyYiv",
         "name": "Original Test Calendar",
         "price": 0,
         "public": True
@@ -123,6 +133,15 @@ async def book_appointment(
 
     if existing_contact:
         contact_id = existing_contact.get("id")
+        # Ensure phone number is saved if it's missing or different in GHL
+        existing_phone = existing_contact.get("phone")
+        if phone and existing_phone != phone:
+            print(f"🔄 [BookingService] Updating contact {contact_id} with phone: {phone}")
+            try:
+                await update_contact(contact_id, ContactUpdate(phone=phone))
+            except Exception as e:
+                print(f"⚠️ [BookingService] Failed to update contact phone: {e}")
+
         # Use AI-provided name as primary since GHL contact may lack name
         contact_name = (
             name

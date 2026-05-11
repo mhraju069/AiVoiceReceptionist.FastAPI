@@ -5,8 +5,9 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from database import get_db
 from models.auth_models import User
-from schemas.auth_schemas import UserCreate, UserResponse, Token, UserRegisterResponse, OTPRequest, ChangePasswordWithOTP
-from utils.auth_utils import get_password_hash, verify_password, create_access_token, decode_access_token
+from schemas.auth_schemas import UserCreate, UserResponse, Token, UserRegisterResponse, OTPRequest, ChangePasswordWithOTP, RefreshTokenRequest
+from utils.auth_utils import get_password_hash, verify_password, create_access_token, decode_access_token, create_refresh_token
+from services.email_service import send_otp_email
 
 router = APIRouter(
     prefix="/api/auth",
@@ -49,6 +50,7 @@ def register_user(user_in: UserCreate, db: Session = Depends(get_db)):
     hashed_password = get_password_hash(user_in.password)
     db_user = User(
         email=user_in.email,
+        name=user_in.name,
         hashed_password=hashed_password
     )
     db.add(db_user)
@@ -56,9 +58,12 @@ def register_user(user_in: UserCreate, db: Session = Depends(get_db)):
     db.refresh(db_user)
 
     access_token = create_access_token(data={"sub": db_user.email})
+    refresh_token = create_refresh_token(data={"sub": db_user.email})
     return {
         "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
+        "name": db_user.name,
         "user": db_user
     }
 
@@ -81,10 +86,16 @@ def login_user(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = D
         )
 
     access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token = create_refresh_token(data={"sub": user.email})
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "name": user.name
+    }
 
 
-@router.post("/login-json", response_model=Token)
+# @router.post("/login-json", response_model=Token)
 def login_user_json(user_in: UserCreate, db: Session = Depends(get_db)):
     """Login with JSON request body (email & password) instead of form data."""
     user = db.query(User).filter(User.email == user_in.email).first()
@@ -102,7 +113,13 @@ def login_user_json(user_in: UserCreate, db: Session = Depends(get_db)):
         )
 
     access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token = create_refresh_token(data={"sub": user.email})
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "name": user.name or "Unknown User"
+    }
 
 
 @router.get("/me", response_model=UserResponse)
@@ -112,7 +129,7 @@ def get_me(current_user: User = Depends(get_current_user)):
 
 
 @router.post("/send-otp")
-def send_otp(otp_in: OTPRequest, db: Session = Depends(get_db)):
+async def send_otp(otp_in: OTPRequest, db: Session = Depends(get_db)):
     """Generate and send an OTP for password reset."""
     user = db.query(User).filter(User.email == otp_in.email).first()
     if not user:
@@ -127,7 +144,14 @@ def send_otp(otp_in: OTPRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     
-    return {"message": "OTP generated and sent successfully to email", "otp": otp}
+    # Send OTP via Email
+    try:
+        await send_otp_email(user.email, otp)
+    except Exception as e:
+        print(f"Error sending OTP email: {e}")
+        # Optionally raise error or continue
+    
+    return {"message": "OTP generated and sent successfully to email"}
 
 
 @router.post("/reset-password-with-otp")
@@ -159,3 +183,33 @@ def reset_password_with_otp(change_in: ChangePasswordWithOTP, db: Session = Depe
     db.refresh(user)
     
     return {"message": "Password changed successfully!"}
+
+
+@router.post("/refresh", response_model=Token)
+def refresh_access_token(refresh_in: RefreshTokenRequest, db: Session = Depends(get_db)):
+    """Generate a new access token using a valid refresh token."""
+    payload = decode_access_token(refresh_in.refresh_token)
+    if payload is None or not payload.get("refresh"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        )
+    
+    email = payload.get("sub")
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+        
+    access_token = create_access_token(data={"sub": user.email})
+    # We also rotate the refresh token
+    new_refresh_token = create_refresh_token(data={"sub": user.email})
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+        "name": user.name
+    }

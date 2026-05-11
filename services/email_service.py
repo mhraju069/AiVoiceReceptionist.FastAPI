@@ -110,3 +110,28 @@ async def send_stripe_payment_link(
 </html>
 """
     await send_email(to_email, subject, html_body)
+
+async def send_otp_email(to_email: str, otp: str):
+    """Send a password reset OTP email."""
+    subject = f"🔑 Your OTP for Password Reset: {otp}"
+    html_body = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; background: #f4f4f4; padding: 20px;">
+  <div style="max-width: 500px; margin: auto; background: white; border-radius: 12px; padding: 32px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center;">
+    <h2 style="color: #6B3FA0;">Password Reset OTP</h2>
+    <p>You requested an OTP to reset your password. Use the code below to proceed:</p>
+    
+    <div style="background: #f0eaff; border-radius: 8px; padding: 20px; margin: 24px 0; font-size: 32px; font-weight: bold; color: #6B3FA0; letter-spacing: 5px;">
+      {otp}
+    </div>
+
+    <p style="color: #888; font-size: 14px;">
+      This OTP is valid for 10 minutes. If you did not request this, please ignore this email.
+    </p>
+  </div>
+</body>
+</html>
+"""
+    await send_email(to_email, subject, html_body)

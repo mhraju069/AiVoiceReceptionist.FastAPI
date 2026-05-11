@@ -1,10 +1,9 @@
-import os
-import json
-import base64
-import asyncio
-import httpx
+import os,json,base64,asyncio,httpx,datetime
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect, HTTPException
 import websockets
+from database import SessionLocal
+from models.activity_models import CallLog
+
 
 router = APIRouter(
     prefix="/api/twilio",
@@ -109,17 +108,14 @@ async def make_outbound_call(request: Request):
 
 @router.post("/incoming-call")
 async def incoming_call(request: Request):
-    """
-    TwiML webhook for answering incoming calls and bridging to the WebSocket stream.
-    """
-    host = request.headers.get("host", request.base_url.hostname)
-    print(f"\n📞 [Incoming Call] Received a call! Host header is: {host}")
-
+    form_data = await request.form()
+    caller_number = form_data.get("From", "Unknown")
+    
     # Always wss for public/ngrok hosts, ws only for pure localhost
     is_local = host.startswith("localhost") or host.startswith("127.0.0.1")
     ws_protocol = "ws" if is_local else "wss"
-    stream_url = f"{ws_protocol}://{host}/api/twilio/stream"
-    print(f"📞 [Incoming Call] Bridging call to WebSocket: {stream_url}")
+    stream_url = f"{ws_protocol}://{host}/api/twilio/stream?caller_number={caller_number}"
+    print(f"📞 [Incoming Call] Bridging call from {caller_number} to WebSocket: {stream_url}")
 
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -139,8 +135,12 @@ async def twilio_stream(websocket: WebSocket):
     between Twilio and the OpenAI Realtime API.
     """
     await websocket.accept()
-    print("\n🔌 [WebSocket] Twilio WebSocket connection accepted.")
+    caller_number = websocket.query_params.get("caller_number", "Unknown")
+    print(f"\n🔌 [WebSocket] Twilio WebSocket connection accepted from: {caller_number}")
+    # Metadata for call logging
     stream_sid = None
+    call_sid = None
+    transcript_accumulator = []
     openai_ws = None
 
     # Connect to OpenAI Realtime API if the API key is present
@@ -247,7 +247,12 @@ async def twilio_stream(websocket: WebSocket):
 
                 if data.get("event") == "start":
                     stream_sid = data["start"]["streamSid"]
-                    print(f"🎬 [Twilio -> Server] Media stream started. Stream SID: [{stream_sid}]")
+                    call_sid = data["start"].get("callSid")
+                    # Use caller_number from query params as primary, but check custom params too
+                    new_caller = data["start"].get("customParameters", {}).get("callerNumber")
+                    if new_caller and new_caller != "Unknown":
+                        caller_number = new_caller
+                    print(f"🎬 [Twilio -> Server] Media stream started. Stream SID: [{stream_sid}], Call SID: [{call_sid}], Caller: [{caller_number}]")
 
                 elif data.get("event") == "media":
                     payload = data["media"]["payload"]
@@ -324,6 +329,13 @@ async def twilio_stream(websocket: WebSocket):
                     user_text = openai_data.get("transcript")
                     if user_text:
                         print(f"\n👤 [Caller]: {user_text}")
+                        transcript_accumulator.append(f"Caller: {user_text}")
+
+                # Catch AI's speech transcript
+                elif openai_data.get("type") == "response.audio_transcript.done":
+                    ai_text = openai_data.get("transcript")
+                    if ai_text:
+                        transcript_accumulator.append(f"AI: {ai_text}")
 
                 # Handle tool calls
                 elif openai_data.get("type") == "response.function_call_arguments.done":
@@ -383,4 +395,62 @@ async def twilio_stream(websocket: WebSocket):
     finally:
         if openai_ws:
             await openai_ws.close()
+        
+        # Save Call Log to Database
+        if transcript_accumulator:
+            full_transcript = "\n".join(transcript_accumulator)
+            try:
+                # Generate AI Summary/Outcome
+                summary = "AI handled the call."
+                intent = "General Inquiry"
+                outcome = "Completed"
+                
+                if OPENAI_API_KEY:
+                    from services.ai_call import generate_ai_response
+                    analysis_prompt = f"""
+                    Analyze this call transcript between an AI Receptionist and a Caller.
+                    Return a JSON object with: 
+                    "summary" (concise 2-3 sentences), 
+                    "intent" (short string), 
+                    "outcome" (one of: Booked, Inquiry, Support, Other),
+                    "lead_status" (one of: Qualified Lead, Warm Lead, Cold Lead),
+                    "tags" (list of strings).
+                    
+                    Transcript:
+                    {full_transcript}
+                    """
+                    try:
+                        analysis_raw = await generate_ai_response(analysis_prompt, system_context="You are a call analyst. Return JSON ONLY.")
+                        # Strip markdown if present
+                        if "```json" in analysis_raw:
+                            analysis_raw = analysis_raw.split("```json")[1].split("```")[0].strip()
+                        analysis = json.loads(analysis_raw)
+                        summary = analysis.get("summary", summary)
+                        intent = analysis.get("intent", intent)
+                        outcome = analysis.get("outcome", outcome)
+                        lead_status = analysis.get("lead_status")
+                        tags = ",".join(analysis.get("tags", []))
+                    except:
+                        lead_status = "Inquiry"
+                        tags = ""
+
+                db = SessionLocal()
+                new_log = CallLog(
+                    call_sid=call_sid or stream_sid,
+                    caller_number=caller_number,
+                    transcript=full_transcript,
+                    summary=summary,
+                    intent=intent,
+                    outcome=outcome,
+                    lead_status=lead_status,
+                    tags=tags,
+                    end_time=datetime.datetime.utcnow()
+                )
+                db.add(new_log)
+                db.commit()
+                db.close()
+                print(f"💾 [Database] Call log saved for SID: {call_sid or stream_sid}")
+            except Exception as e:
+                print(f"🔴 [Database] Error saving call log: {e}")
+
         print("Bidirectional voice session closed.")

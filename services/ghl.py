@@ -1,6 +1,11 @@
 import httpx
 import datetime
-from config import GHL_BASE_URL, GHL_API_KEY, GHL_LOCATION_ID
+from config import (
+    GHL_BASE_URL, GHL_API_KEY, GHL_LOCATION_ID,
+    CALENDAR_FOLLOW_UP_C, CALENDAR_FOLLOW_UP_B, 
+    CALENDAR_VIRTUAL_CONSULT_15, CALENDAR_VIRTUAL_CPA_45, 
+    CALENDAR_OFFICE_CPA_45, CALENDAR_BEAUTY_SALON_45, CALENDAR_TEST
+)
 from schemas import *
 from fastapi import HTTPException
 from typing import Optional
@@ -97,7 +102,7 @@ async def get_all_appointments(
     end_time: Optional[str] = None,
     specific_day: Optional[str] = None,
     this_week: Optional[bool] = None,
-    calendar_id: Optional[str] = "4OIPAoMvrUMkcbRSyYiv"
+    calendar_id: Optional[str] = None
 ):
     """
     Fetch all appointments from GoHighLevel and optionally filter by email, phone, 
@@ -107,31 +112,46 @@ async def get_all_appointments(
     url = f"{GHL_BASE_URL}/appointments/"
     # GHL requires startDate and endDate (epoch ms). Default to 90-day window.
     now_ms = int(_time.time() * 1000)
-    params = {
-        "locationId": GHL_LOCATION_ID,
-        "calendarId": calendar_id,
-        "startDate": now_ms - (30 * 24 * 60 * 60 * 1000),  # 30 days ago
-        "endDate": now_ms + (60 * 24 * 60 * 60 * 1000),    # 60 days ahead
-    }
     
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, params=params, headers=get_ghl_headers())
-        
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+    # If no specific calendar_id is provided, fetch from all known calendars
+    target_calendars = [calendar_id] if calendar_id else [
+        CALENDAR_FOLLOW_UP_C, CALENDAR_FOLLOW_UP_B,
+        CALENDAR_VIRTUAL_CONSULT_15, CALENDAR_VIRTUAL_CPA_45,
+        CALENDAR_OFFICE_CPA_45, CALENDAR_BEAUTY_SALON_45, CALENDAR_TEST
+    ]
+    # Filter out None values in case some env vars are missing
+    target_calendars = [cid for cid in target_calendars if cid]
+
+    all_raw_appointments = []
+    
+    async with httpx.AsyncClient(timeout=20) as client:
+        for cid in target_calendars:
+            params = {
+                "locationId": GHL_LOCATION_ID,
+                "calendarId": cid,
+                "startDate": now_ms - (30 * 24 * 60 * 60 * 1000),  # 30 days ago
+                "endDate": now_ms + (60 * 24 * 60 * 60 * 1000),    # 60 days ahead
+            }
+            try:
+                response = await client.get(url, params=params, headers=get_ghl_headers())
+                if response.status_code == 200:
+                    data = response.json()
+                    appts = data if isinstance(data, list) else data.get("appointments", [])
+                    all_raw_appointments.extend(appts)
+            except Exception as e:
+                print(f"Error fetching from calendar {cid}: {e}")
             
-        appointments_data = response.json()
-        
-        # GHL returns either a list of appointments directly, or under a key
-        appointments = []
-        if isinstance(appointments_data, list):
-            appointments = appointments_data
-        elif isinstance(appointments_data, dict):
-            appointments = appointments_data.get("appointments", [])
-            
-        # Perform local filtering
+        # Perform local filtering on the consolidated list
         filtered_appointments = []
-        for appt in appointments:
+        # Use a set to avoid duplicates if an appointment somehow appears in multiple calendars (rare but safe)
+        seen_ids = set()
+        
+        for appt in all_raw_appointments:
+            appt_id = appt.get("id")
+            if appt_id in seen_ids:
+                continue
+            seen_ids.add(appt_id)
+            
             contact = appt.get("contact", {})
             
             if email and email.lower() not in contact.get("email", "").lower():
@@ -207,3 +227,24 @@ async def get_all_appointments(
         
         enriched = await asyncio.gather(*[enrich(a) for a in filtered_appointments])
         return list(enriched)
+
+
+async def get_contacts(query: Optional[str] = None, limit: int = 20):
+    """
+    Fetch contacts from GoHighLevel.
+    """
+    url = f"{GHL_BASE_URL}/contacts/"
+    params = {
+        "locationId": GHL_LOCATION_ID,
+        "limit": limit
+    }
+    if query:
+        params["query"] = query
+        
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params, headers=get_ghl_headers())
+        
+        if response.status_code == 200:
+            return response.json().get("contacts", [])
+        else:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
