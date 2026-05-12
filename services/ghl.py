@@ -9,6 +9,12 @@ from config import (
 from schemas import *
 from fastapi import HTTPException
 from typing import Optional
+import time as _time
+
+# In-memory cache stores
+CACHE_TTL = 300  # 5 minutes in seconds
+_appointments_cache = {}
+_contacts_cache = {}
 
 # Create headers for GHL API requests
 def get_ghl_headers():
@@ -108,10 +114,17 @@ async def get_all_appointments(
     Fetch all appointments from GoHighLevel and optionally filter by email, phone, 
     time range, specific day (or today), or this week.
     """
-    import time as _time
+    cache_key = f"{email}_{phone}_{start_time}_{end_time}_{specific_day}_{this_week}_{calendar_id}"
+    now_sec = _time.time()
+    
+    if cache_key in _appointments_cache:
+        cached_entry = _appointments_cache[cache_key]
+        if now_sec - cached_entry["timestamp"] < CACHE_TTL:
+            return cached_entry["data"]
+
     url = f"{GHL_BASE_URL}/appointments/"
     # GHL requires startDate and endDate (epoch ms). Default to 90-day window.
-    now_ms = int(_time.time() * 1000)
+    now_ms = int(now_sec * 1000)
     
     # If no specific calendar_id is provided, fetch from all known calendars
     target_calendars = [calendar_id] if calendar_id else [
@@ -226,13 +239,27 @@ async def get_all_appointments(
             return merged
         
         enriched = await asyncio.gather(*[enrich(a) for a in filtered_appointments])
-        return list(enriched)
+        
+        final_data = list(enriched)
+        _appointments_cache[cache_key] = {
+            "timestamp": now_sec,
+            "data": final_data
+        }
+        return final_data
 
 
 async def get_contacts(query: Optional[str] = None, limit: int = 20):
     """
     Fetch contacts from GoHighLevel.
     """
+    cache_key = f"{query}_{limit}"
+    now_sec = _time.time()
+    
+    if cache_key in _contacts_cache:
+        cached_entry = _contacts_cache[cache_key]
+        if now_sec - cached_entry["timestamp"] < CACHE_TTL:
+            return cached_entry["data"]
+
     url = f"{GHL_BASE_URL}/contacts/"
     params = {
         "locationId": GHL_LOCATION_ID,
@@ -245,6 +272,11 @@ async def get_contacts(query: Optional[str] = None, limit: int = 20):
         response = await client.get(url, params=params, headers=get_ghl_headers())
         
         if response.status_code == 200:
-            return response.json().get("contacts", [])
+            data = response.json().get("contacts", [])
+            _contacts_cache[cache_key] = {
+                "timestamp": now_sec,
+                "data": data
+            }
+            return data
         else:
             raise HTTPException(status_code=response.status_code, detail=response.text)

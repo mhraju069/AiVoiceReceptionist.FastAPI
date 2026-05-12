@@ -27,4 +27,5 @@ class CallLog(Base):
     outcome = Column(String, nullable=True)
     status = Column(String, default="completed") # e.g., completed, missed
     lead_status = Column(String, nullable=True) # e.g., Qualified Lead
+    reason = Column(String, nullable=True) # Concise 2-3 word summary
     tags = Column(String, nullable=True) # JSON or comma-separated string

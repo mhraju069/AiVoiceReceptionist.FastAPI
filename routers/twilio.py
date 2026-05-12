@@ -142,6 +142,7 @@ async def twilio_stream(websocket: WebSocket):
     call_sid = None
     transcript_accumulator = []
     openai_ws = None
+    start_time_dt = datetime.datetime.utcnow()
 
     # Connect to OpenAI Realtime API if the API key is present
     if OPENAI_API_KEY:
@@ -411,8 +412,9 @@ async def twilio_stream(websocket: WebSocket):
                     Analyze this call transcript between an AI Receptionist and a Caller.
                     Return a JSON object with: 
                     "summary" (concise 2-3 sentences), 
-                    "intent" (short string), 
-                    "outcome" (one of: Booked, Inquiry, Support, Other),
+                    "reason" (EXACTLY 2-3 words summary of the call purpose),
+                    "intent" (short string like "Tax Preparation"), 
+                    "outcome" (If an appointment was booked, the date like "May 12", else "Completed", "Inquiry", etc.),
                     "lead_status" (one of: Qualified Lead, Warm Lead, Cold Lead),
                     "tags" (list of strings).
                     
@@ -426,11 +428,13 @@ async def twilio_stream(websocket: WebSocket):
                             analysis_raw = analysis_raw.split("```json")[1].split("```")[0].strip()
                         analysis = json.loads(analysis_raw)
                         summary = analysis.get("summary", summary)
+                        reason = analysis.get("reason", "Inquiry")
                         intent = analysis.get("intent", intent)
                         outcome = analysis.get("outcome", outcome)
                         lead_status = analysis.get("lead_status")
                         tags = ",".join(analysis.get("tags", []))
                     except:
+                        reason = "Inquiry"
                         lead_status = "Inquiry"
                         tags = ""
 
@@ -440,11 +444,14 @@ async def twilio_stream(websocket: WebSocket):
                     caller_number=caller_number,
                     transcript=full_transcript,
                     summary=summary,
+                    reason=reason,
                     intent=intent,
                     outcome=outcome,
                     lead_status=lead_status,
                     tags=tags,
-                    end_time=datetime.datetime.utcnow()
+                    start_time=start_time_dt,
+                    end_time=datetime.datetime.utcnow(),
+                    duration=int((datetime.datetime.utcnow() - start_time_dt).total_seconds())
                 )
                 db.add(new_log)
                 db.commit()
