@@ -1,3 +1,10 @@
 .env
-__pycache__
-node_modules
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite3
+*.db
+venv/
+env/
+node_modules/
+.pytest_cache/

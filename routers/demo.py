@@ -173,7 +173,7 @@ async def demo_voice_stream(websocket: WebSocket):
                     "type": "response.create",
                     "response": {
                         "modalities": ["text", "audio"],
-                        "instructions": "Greet the caller warmly. Say: Hello! I'm the AI receptionist for Voca AI. How can I help you today?"
+                        "instructions": "Greet the caller warmly. Say: Hello! I'm the AI receptionist for Pay Minimum Tax. How can I help you today?"
                     }
                 }
                 await openai_ws.send(json.dumps(initial_greeting))

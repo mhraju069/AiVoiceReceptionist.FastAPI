@@ -15,4 +15,4 @@ def load_knowledge() -> str:
         if os.path.exists(p):
             with open(p, "r", encoding="utf-8") as f:
                 return f.read()
-    return "Voca AI is an ultra-premium AI receptionist that assists businesses in handling calls efficiently."
+    return "Pay Minimum Tax is an ultra-premium AI receptionist that assists businesses in handling calls efficiently."

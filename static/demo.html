@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Voca AI — Demo Console</title>
+<title>Pay Minimum Tax — Demo Console</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <style>
@@ -81,13 +81,66 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .test-btn:hover{opacity:.9;transform:translateY(-1px)}
 .test-btn:disabled{opacity:.4;cursor:not-allowed}
 
-@media(max-width:900px){.app{grid-template-columns:1fr;grid-template-rows:auto 1fr 1fr}.call-panel{border-right:none;border-bottom:1px solid var(--border)}}
+/* Mobile Responsiveness Improvements */
+@media(max-width:900px){
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto;
+    height: auto;
+    min-height: 100vh;
+  }
+  .header {
+    padding: 0.8rem 1rem;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+  .logo {
+    font-size: 1.1rem;
+  }
+  .call-panel {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    height: auto;
+  }
+  .call-ui {
+    padding: 2rem 1rem;
+  }
+  .call-avatar {
+    width: 100px;
+    height: 100px;
+    font-size: 2.5rem;
+  }
+  .call-timer {
+    font-size: 1.5rem;
+  }
+  .debug-panel {
+    height: 500px; /* Fixed height for log area on mobile */
+  }
+  .booking-form {
+    grid-template-columns: 1fr;
+  }
+  .transcript-area {
+    max-height: 150px;
+  }
+}
+
+@media(max-width:480px){
+  .logo span:last-child {
+    display: none; /* Hide 'Demo Console' text on very small screens */
+  }
+  .status-bar {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
 </style>
 </head>
 <body>
 <div class="app">
   <div class="header">
-    <div class="logo"><i class="fas fa-microphone-alt"></i><span>Voca AI</span> <span style="font-weight:400;font-size:.9rem;color:var(--text3)">Demo Console</span></div>
+    <div class="logo"><i class="fas fa-microphone-alt"></i><span>Pay Minimum Tax</span> <span style="font-weight:400;font-size:.9rem;color:var(--text3)">Demo Console</span></div>
     <div class="status-bar">
       <div id="statusDot" class="status-dot"></div>
       <span id="statusLabel" class="status-label">Disconnected</span>
@@ -368,7 +421,7 @@ async function testBooking() {
 
 // Connect debug WS on load
 window.addEventListener('load', () => {
-  log('🚀 Voca AI Demo Console loaded', 'success');
+  log('🚀 Pay Minimum Tax Demo Console loaded', 'success');
   log('💡 Click the green phone button to start a voice call', 'info');
   log('💡 Use the booking panel below to test the full flow', 'info');
 });

@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+
 import os,json,base64,asyncio,httpx,datetime
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect, HTTPException
 import websockets
@@ -115,11 +118,11 @@ async def incoming_call(request: Request):
     is_local = host.startswith("localhost") or host.startswith("127.0.0.1")
     ws_protocol = "ws" if is_local else "wss"
     stream_url = f"{ws_protocol}://{host}/api/twilio/stream?caller_number={caller_number}"
-    print(f"📞 [Incoming Call] Bridging call from {caller_number} to WebSocket: {stream_url}")
+    logger.info(f"📞 [Incoming Call] Bridging call from {caller_number} to WebSocket: {stream_url}")
 
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say language="en-US">Hello! Welcome to Voca AI. Please wait a moment while I connect you.</Say>
+    <Say language="en-US">Hello! Welcome to Pay Minimum Tax. Please wait a moment while I connect you.</Say>
     <Connect>
         <Stream url="{stream_url}" />
     </Connect>
@@ -136,7 +139,7 @@ async def twilio_stream(websocket: WebSocket):
     """
     await websocket.accept()
     caller_number = websocket.query_params.get("caller_number", "Unknown")
-    print(f"\n🔌 [WebSocket] Twilio WebSocket connection accepted from: {caller_number}")
+    logger.info(f"\n🔌 [WebSocket] Twilio WebSocket connection accepted from: {caller_number}")
     # Metadata for call logging
     stream_sid = None
     call_sid = None
@@ -147,13 +150,13 @@ async def twilio_stream(websocket: WebSocket):
     # Connect to OpenAI Realtime API if the API key is present
     if OPENAI_API_KEY:
         try:
-            print("🤖 [OpenAI] Attempting to connect to OpenAI Realtime API...")
+            logger.info("🤖 [OpenAI] Attempting to connect to OpenAI Realtime API...")
             headers = {
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "OpenAI-Beta": "realtime=v1"
             }
             openai_ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
-            print("🟢 [OpenAI] Successfully connected to OpenAI Realtime API.")
+            logger.info("🟢 [OpenAI] Successfully connected to OpenAI Realtime API.")
 
             from services.prompts import system_prompt
 
@@ -219,24 +222,24 @@ async def twilio_stream(websocket: WebSocket):
                 }
             }
             await openai_ws.send(json.dumps(session_update))
-            print("📝 [OpenAI] Sent session configuration update with turn detection.")
+            logger.info("📝 [OpenAI] Sent session configuration update with turn detection.")
 
             # Trigger an initial greeting in Bangla immediately
             initial_greeting = {
                 "type": "response.create",
                 "response": {
                     "modalities": ["text", "audio"],
-                    "instructions": "Greet the caller in Bangla warmly. Say: হ্যালো! আমি Voca AI এর AI রিসেপশনিস্ট। আমি আপনাকে কিভাবে সাহায্য করতে পারি?"
+                    "instructions": "Greet the caller in Dhaka Bangla warmly. Your name is Reba. Say: ধন্যবাদ, আমি রেবা বলছি Pay Minimum Tax থেকে। আপনাকে কিভাবে সাহায্য করতে পারি?"
                 }
             }
             await openai_ws.send(json.dumps(initial_greeting))
-            print("🗣️ [OpenAI] Sent initial Bangla greeting trigger.")
+            logger.info("🗣️ [OpenAI] Sent initial Bangla greeting trigger.")
 
         except Exception as e:
-            print(f"🔴 [OpenAI] Error connecting to OpenAI Realtime API: {e}. Falling back to echo/mock.")
+            logger.info(f"🔴 [OpenAI] Error connecting to OpenAI Realtime API: {e}. Falling back to echo/mock.")
             openai_ws = None
     else:
-        print("⚠️ [OpenAI] OPENAI_API_KEY not found. Operating in fallback mode.")
+        logger.info("⚠️ [OpenAI] OPENAI_API_KEY not found. Operating in fallback mode.")
 
     async def receive_from_twilio():
         nonlocal stream_sid
@@ -253,14 +256,14 @@ async def twilio_stream(websocket: WebSocket):
                     new_caller = data["start"].get("customParameters", {}).get("callerNumber")
                     if new_caller and new_caller != "Unknown":
                         caller_number = new_caller
-                    print(f"🎬 [Twilio -> Server] Media stream started. Stream SID: [{stream_sid}], Call SID: [{call_sid}], Caller: [{caller_number}]")
+                    logger.info(f"🎬 [Twilio -> Server] Media stream started. Stream SID: [{stream_sid}], Call SID: [{call_sid}], Caller: [{caller_number}]")
 
                 elif data.get("event") == "media":
                     payload = data["media"]["payload"]
                     media_count += 1
                     
                     if media_count % 100 == 0:
-                        print(f"🔊 [Twilio -> Server] Received {media_count} audio chunks from caller...")
+                        logger.info(f"🔊 [Twilio -> Server] Received {media_count} audio chunks from caller...")
                     
                     if openai_ws:
                         # Stream raw audio buffer directly to OpenAI
@@ -272,7 +275,7 @@ async def twilio_stream(websocket: WebSocket):
                     else:
                         # Fallback/Mock - Echo back a tiny beep or silence to prove connection
                         if media_count % 50 == 0:
-                            print(f"🛠️ [Mock Mode] Echoing dummy response for chunk {media_count}")
+                            logger.info(f"🛠️ [Mock Mode] Echoing dummy response for chunk {media_count}")
                             mock_response = {
                                 "event": "media",
                                 "streamSid": stream_sid,
@@ -283,13 +286,13 @@ async def twilio_stream(websocket: WebSocket):
                             await websocket.send_text(json.dumps(mock_response))
 
                 elif data.get("event") == "stop":
-                    print(f"🛑 [Twilio -> Server] Media stream stopped. Total chunks: {media_count}")
+                    logger.info(f"🛑 [Twilio -> Server] Media stream stopped. Total chunks: {media_count}")
                     break
 
         except WebSocketDisconnect:
-            print("⚠️ [Twilio WebSocket] Disconnected from Twilio.")
+            logger.info("⚠️ [Twilio WebSocket] Disconnected from Twilio.")
         except Exception as e:
-            print(f"🔴 [Twilio WebSocket] Error reading from Twilio: {e}")
+            logger.info(f"🔴 [Twilio WebSocket] Error reading from Twilio: {e}")
 
     async def send_to_twilio():
         nonlocal stream_sid
@@ -307,7 +310,7 @@ async def twilio_stream(websocket: WebSocket):
                     openai_media_count += 1
 
                     if openai_media_count % 100 == 0:
-                        print(f"🎙️ [OpenAI -> Server] Received {openai_media_count} audio chunks from AI...")
+                        logger.info(f"🎙️ [OpenAI -> Server] Received {openai_media_count} audio chunks from AI...")
 
                     if stream_sid:
                         twilio_payload = {
@@ -319,17 +322,26 @@ async def twilio_stream(websocket: WebSocket):
                         }
                         await websocket.send_text(json.dumps(twilio_payload))
                 
+                # Handle user interruption: Stop AI audio playback immediately
+                elif openai_data.get("type") == "input_audio_buffer.speech_started":
+                    logger.info("🛑 [OpenAI] User interrupted! Clearing Twilio audio buffer...")
+                    if stream_sid:
+                        await websocket.send_text(json.dumps({
+                            "event": "clear",
+                            "streamSid": stream_sid
+                        }))
+                
                 # Additional debug logging for other important OpenAI events
                 elif openai_data.get("type") in ["response.text.done", "response.audio_transcript.done"]:
                     text = openai_data.get("text") or openai_data.get("transcript")
                     if text:
-                        print(f"\n🤖 [AI Reply]: {text}")
+                        logger.info(f"\n🤖 [AI Reply]: {text}")
                 
                 # Catch the user's speech transcript
                 elif openai_data.get("type") == "conversation.item.input_audio_transcription.completed":
                     user_text = openai_data.get("transcript")
                     if user_text:
-                        print(f"\n👤 [Caller]: {user_text}")
+                        logger.info(f"\n👤 [Caller]: {user_text}")
                         transcript_accumulator.append(f"Caller: {user_text}")
 
                 # Catch AI's speech transcript
@@ -343,7 +355,7 @@ async def twilio_stream(websocket: WebSocket):
                     func_name = openai_data.get("name")
                     call_id = openai_data.get("call_id")
                     args = json.loads(openai_data.get("arguments", "{}"))
-                    print(f"\n🛠️ [OpenAI] AI called tool '{func_name}' with args: {args}")
+                    logger.info(f"\n🛠️ [OpenAI] AI called tool '{func_name}' with args: {args}")
                     
                     if func_name == "book_appointment":
                         from services.booking_service import book_appointment
@@ -356,10 +368,10 @@ async def twilio_stream(websocket: WebSocket):
                                 calendar_type=args.get("calendar_type", "follow_up_b"),
                                 call_summary=args.get("call_summary", ""),
                             )
-                            print(f"✅ [OpenAI] Booking result: {result.get('status')}")
+                            logger.info(f"✅ [OpenAI] Booking result: {result.get('status')}")
                         except Exception as e:
                             result = {"status": "error", "message": "Sorry, there was a technical issue booking your appointment. Please try again later."}
-                            print(f"🔴 [OpenAI] Booking exception: {e}")
+                            logger.info(f"🔴 [OpenAI] Booking exception: {e}")
                     
                     elif func_name == "get_available_slots":
                         from services.booking_service import get_slots
@@ -367,10 +379,10 @@ async def twilio_stream(websocket: WebSocket):
                             result = await get_slots(
                                 calendar_type=args.get("calendar_type", "follow_up_b")
                             )
-                            print(f"✅ [OpenAI] Slots fetched successfully.")
+                            logger.info(f"✅ [OpenAI] Slots fetched successfully.")
                         except Exception as e:
                             result = {"status": "error", "message": "Could not fetch available slots."}
-                            print(f"🔴 [OpenAI] Slot fetch exception: {e}")
+                            logger.info(f"🔴 [OpenAI] Slot fetch exception: {e}")
                     
                     # Send output back to OpenAI
                     await openai_ws.send(json.dumps({
@@ -385,7 +397,7 @@ async def twilio_stream(websocket: WebSocket):
                     await openai_ws.send(json.dumps({"type": "response.create"}))
 
         except Exception as e:
-            print(f"🔴 [OpenAI -> Twilio] Error streaming response from OpenAI to Twilio: {e}")
+            logger.info(f"🔴 [OpenAI -> Twilio] Error streaming response from OpenAI to Twilio: {e}")
 
     # Orchestrate bidirectional async tasks
     try:
@@ -456,8 +468,8 @@ async def twilio_stream(websocket: WebSocket):
                 db.add(new_log)
                 db.commit()
                 db.close()
-                print(f"💾 [Database] Call log saved for SID: {call_sid or stream_sid}")
+                logger.info(f"💾 [Database] Call log saved for SID: {call_sid or stream_sid}")
             except Exception as e:
-                print(f"🔴 [Database] Error saving call log: {e}")
+                logger.info(f"🔴 [Database] Error saving call log: {e}")
 
-        print("Bidirectional voice session closed.")
+        logger.info("Bidirectional voice session closed.")

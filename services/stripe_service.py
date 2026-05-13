@@ -37,8 +37,8 @@ async def create_stripe_payment_link(
         "line_items[0][price_data][product_data][name]": "AI Receptionist Booking Fee",
         "line_items[0][price_data][unit_amount]": "10000",  # $100.00 in cents
         "line_items[0][quantity]": "1",
-        "success_url": "https://vocaai.com/booking-success?session_id={CHECKOUT_SESSION_ID}",
-        "cancel_url": "https://vocaai.com/booking-cancelled",
+        "success_url": "https://payminimumtax.com/booking-success?session_id={CHECKOUT_SESSION_ID}",
+        "cancel_url": "https://payminimumtax.com/booking-cancelled",
         # All metadata fields for the webhook to consume
         "metadata[customer_name]": customer_name,
         "metadata[customer_email]": customer_email,

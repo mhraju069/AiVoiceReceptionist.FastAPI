@@ -7,7 +7,7 @@ from utils.auth_utils import get_password_hash
 
 def main():
     print("==========================================")
-    print("   Voca AI CLI Authentication Manager")
+    print("   Pay Minimum Tax CLI Authentication Manager")
     print("==========================================")
 
     db_urls = [

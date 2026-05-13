@@ -11,7 +11,11 @@ from models.activity_models import Activity, CallLog
 from services.ghl import get_all_appointments, get_contacts
 from routers.twilio import TWILIO_SID, TWILIO_AUTH_TOKEN
 from schemas.dashboard_schemas import LeadsDashboardResponse, CalendarDashboardResponse, StatsDashboardResponse, LeadsListResponse, CallLogListResponse, CallLogSummaryResponse
+from services.ai_call import generate_ai_response
+import time as _time
 import re
+
+_insight_cache = {"timestamp": 0, "text": "Tax season is peaking — 67% of today's calls are tax-related. Consider promoting your express filing package."}
 
 def normalize_phone(phone: str) -> str:
     """Strip all non-numeric characters from phone string."""
@@ -155,7 +159,22 @@ async def get_dashboard_stats(calendar_id: Optional[str] = None, db: Session = D
     # 4. Generate simulated insights and growth (for now)
     calls_growth = f"+{calls_today} today"
     booked_growth = f"+{todays_booking_count} today"
-    ai_insight = "Tax season is peaking — 67% of today's calls are tax-related. Consider promoting your express filing package."
+    
+    # Generate dynamic AI insight based on recent calls, cache for 5 mins
+    now_sec = _time.time()
+    if now_sec - _insight_cache["timestamp"] > 300:
+        summary_texts = []
+        for c in recent_calls_raw[:5]:
+            summary_texts.append(f"Call reason: {c.reason}, Duration: {c.duration}s")
+        prompt = "Based on these recent calls: " + "; ".join(summary_texts) + ". Provide a one-sentence business insight or recommendation (under 15 words) for the dashboard."
+        try:
+            new_insight = await generate_ai_response(prompt, system_context="You are an expert data analyst AI.")
+            _insight_cache["text"] = new_insight
+            _insight_cache["timestamp"] = now_sec
+        except Exception:
+            pass
+            
+    ai_insight = _insight_cache["text"]
 
     return {
         "todays_call_count": calls_today,

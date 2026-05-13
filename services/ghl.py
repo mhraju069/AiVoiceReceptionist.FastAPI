@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+
 import httpx
 import datetime
 from config import (
@@ -152,7 +155,7 @@ async def get_all_appointments(
                     appts = data if isinstance(data, list) else data.get("appointments", [])
                     all_raw_appointments.extend(appts)
             except Exception as e:
-                print(f"Error fetching from calendar {cid}: {e}")
+                logger.info(f"Error fetching from calendar {cid}: {e}")
             
         # Perform local filtering on the consolidated list
         filtered_appointments = []

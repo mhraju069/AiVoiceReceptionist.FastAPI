@@ -40,7 +40,7 @@ async def send_booking_confirmation(
     call_summary: str,
 ):
     """Send appointment confirmation email to an existing contact."""
-    subject = "✅ Your Appointment is Confirmed — Voca AI"
+    subject = "✅ Your Appointment is Confirmed — Pay Minimum Tax"
     html_body = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -49,7 +49,7 @@ async def send_booking_confirmation(
   <div style="max-width: 600px; margin: auto; background: white; border-radius: 12px; padding: 32px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
     <h2 style="color: #6B3FA0;">🎉 Appointment Confirmed!</h2>
     <p>Dear <strong>{contact_name}</strong>,</p>
-    <p>Your appointment with Voca AI has been successfully booked.</p>
+    <p>Your appointment with Pay Minimum Tax has been successfully booked.</p>
 
     <div style="background: #f0eaff; border-radius: 8px; padding: 16px; margin: 20px 0;">
       <p><strong>📅 Date:</strong> {booking_date}</p>
@@ -62,7 +62,7 @@ async def send_booking_confirmation(
     </div>
 
     <p style="margin-top: 24px; color: #888; font-size: 12px;">
-      Thank you for choosing Voca AI. If you have any questions, please feel free to contact us.
+      Thank you for choosing Pay Minimum Tax. If you have any questions, please feel free to contact us.
     </p>
   </div>
 </body>
@@ -78,7 +78,7 @@ async def send_stripe_payment_link(
     call_summary: str,
 ):
     """Send a Stripe payment link email to a new contact."""
-    subject = "💳 Complete Your Booking Payment — Voca AI"
+    subject = "💳 Complete Your Booking Payment — Pay Minimum Tax"
     html_body = f"""
 <!DOCTYPE html>
 <html lang="en">

@@ -40,7 +40,7 @@ async def generate_ai_response(user_message: str, system_context: Optional[str] 
     # Fallback/Mock conversational AI response logic
     msg_lower = user_message.lower()
     if "hello" in msg_lower or "hi" in msg_lower:
-        return "Hello! Thank you for calling Voca AI Receptionist. How can I assist you today?"
+        return "Hello! Thank you for calling Pay Minimum Tax Receptionist. How can I assist you today?"
     elif "appointment" in msg_lower or "book" in msg_lower:
         return "I'd be happy to help you book an appointment. May I know your name and preferred date?"
     elif "pricing" in msg_lower or "cost" in msg_lower:

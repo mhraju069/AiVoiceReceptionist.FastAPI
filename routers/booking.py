@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+
 """
 AI Post-Call Booking Router.
 
@@ -114,7 +117,7 @@ async def process_booking(req: BookingRequest):
     New contact       -> Send Stripe payment link -> Booking created after payment
     """
 
-    print(f"\n📋 [Booking] Processing booking for phone={req.phone}, email={req.email}")
+    logger.info(f"\n📋 [Booking] Processing booking for phone={req.phone}, email={req.email}")
     
     final_booking_slot = req.booking_slot
 
@@ -131,7 +134,7 @@ async def process_booking(req: BookingRequest):
             or req.name
         )
 
-        print(f"✅ [Booking] Existing contact found: {contact_id} ({contact_name})")
+        logger.info(f"✅ [Booking] Existing contact found: {contact_id} ({contact_name})")
 
         # ── Step 2a: Book appointment in GHL ──────────────────────────────
         # Ensure timezone matches the slot format (GHL requirement)
@@ -156,7 +159,7 @@ async def process_booking(req: BookingRequest):
         )
         appointment = await create_appointment(appointment_data)
         appointment_id = appointment.get("id", "N/A")
-        print(f"📅 [Booking] Appointment created in GHL: {appointment_id}")
+        logger.info(f"📅 [Booking] Appointment created in GHL: {appointment_id}")
 
         # Parse slot for readable display
         try:
@@ -175,7 +178,7 @@ async def process_booking(req: BookingRequest):
             booking_time=booking_time,
             call_summary=req.call_summary,
         )
-        print(f"📧 [Booking] Confirmation email sent to {req.email}")
+        logger.info(f"📧 [Booking] Confirmation email sent to {req.email}")
 
         return {
             "status": "confirmed",
@@ -194,7 +197,7 @@ async def process_booking(req: BookingRequest):
 
     else:
         # ── Step 2b: New contact — create Stripe payment link ──────────────
-        print(f"🆕 [Booking] New contact. Creating Stripe payment link...")
+        logger.info(f"🆕 [Booking] New contact. Creating Stripe payment link...")
 
         payment_url = await create_stripe_payment_link(
             customer_email=str(req.email),
@@ -211,7 +214,7 @@ async def process_booking(req: BookingRequest):
             payment_url=payment_url,
             call_summary=req.call_summary,
         )
-        print(f"💳 [Booking] Stripe payment link sent to {req.email}")
+        logger.info(f"💳 [Booking] Stripe payment link sent to {req.email}")
 
         return {
             "status": "payment_required",
@@ -281,14 +284,14 @@ async def stripe_webhook(
             if not hmac.compare_digest(expected, v1):
                 raise HTTPException(status_code=400, detail="Stripe signature mismatch — unauthorized request")
 
-            print("🔐 [Stripe Webhook] Signature verified.")
+            logger.info("🔐 [Stripe Webhook] Signature verified.")
 
         except HTTPException:
             raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Signature error: {exc}")
     else:
-        print("⚠️  [Stripe Webhook] STRIPE_WEBHOOK_SECRET not set — skipping signature check!")
+        logger.info("⚠️  [Stripe Webhook] STRIPE_WEBHOOK_SECRET not set — skipping signature check!")
 
     # ── Parse event JSON ──────────────────────────────────────────────────
     try:
@@ -297,11 +300,11 @@ async def stripe_webhook(
         raise HTTPException(status_code=400, detail="Could not parse Stripe event JSON")
 
     event_type = event.get("type", "unknown")
-    print(f"\n📦 [Stripe Webhook] Event received: {event_type}")
+    logger.info(f"\n📦 [Stripe Webhook] Event received: {event_type}")
 
     # ── Only handle completed checkout sessions ────────────────────────────
     if event_type != "checkout.session.completed":
-        print(f"   Ignored (not a completed checkout)")
+        logger.info(f"   Ignored (not a completed checkout)")
         return {"received": True, "processed": False}
 
     session = event["data"]["object"]
@@ -316,11 +319,11 @@ async def stripe_webhook(
     calendar_id    = meta.get("calendar_id", "")
     call_summary   = meta.get("call_summary", "")
 
-    print(f"💰 [Stripe Webhook] Payment confirmed!")
-    print(f"   👤 Name:    {customer_name}")
-    print(f"   📧 Email:   {customer_email}")
-    print(f"   📅 Slot:    {booking_slot}")
-    print(f"   💳 Session: {stripe_session_id}")
+    logger.info(f"💰 [Stripe Webhook] Payment confirmed!")
+    logger.info(f"   👤 Name:    {customer_name}")
+    logger.info(f"   📧 Email:   {customer_email}")
+    logger.info(f"   📅 Slot:    {booking_slot}")
+    logger.info(f"   💳 Session: {stripe_session_id}")
 
     if not customer_email:
         raise HTTPException(status_code=400, detail="No customer_email in Stripe session/metadata")
@@ -331,7 +334,7 @@ async def stripe_webhook(
     # ────────────────────────────────────────────────────────────────────
     # Step 1: Create contact in GHL
     # ────────────────────────────────────────────────────────────────────
-    print(f"\n📋 [Step 1/3] Creating GHL contact for '{customer_name}' <{customer_email}>...")
+    logger.info(f"\n📋 [Step 1/3] Creating GHL contact for '{customer_name}' <{customer_email}>...")
     try:
         contact_resp = await add_contact(ContactCreate(
             email=customer_email,
@@ -343,9 +346,9 @@ async def stripe_webhook(
         # GHL v1 API returns {"contact": {id, ...}} or the object directly
         contact_obj = contact_resp.get("contact") or contact_resp
         contact_id  = contact_obj.get("id") or contact_obj.get("contactId", "unknown")
-        print(f"✅ [Step 1/3] GHL contact created — ID: {contact_id}")
+        logger.info(f"✅ [Step 1/3] GHL contact created — ID: {contact_id}")
     except Exception as exc:
-        print(f"🔴 [Step 1/3] Failed to create GHL contact: {exc}")
+        logger.info(f"🔴 [Step 1/3] Failed to create GHL contact: {exc}")
         raise HTTPException(status_code=500, detail=f"GHL contact creation failed: {exc}")
 
     # ────────────────────────────────────────────────────────────────────
@@ -353,7 +356,7 @@ async def stripe_webhook(
     # ────────────────────────────────────────────────────────────────────
     appointment_id = "N/A"
     if calendar_id:
-        print(f"\n📅 [Step 2/3] Booking appointment in GHL calendar '{calendar_id}'...")
+        logger.info(f"\n📅 [Step 2/3] Booking appointment in GHL calendar '{calendar_id}'...")
         try:
             appt_resp = await create_appointment(AppointmentCreate(
                 contactId=contact_id,
@@ -368,17 +371,17 @@ async def stripe_webhook(
                 status="booked",
             ))
             appointment_id = appt_resp.get("id", "N/A")
-            print(f"✅ [Step 2/3] GHL appointment booked — ID: {appointment_id}")
+            logger.info(f"✅ [Step 2/3] GHL appointment booked — ID: {appointment_id}")
         except Exception as exc:
             # Non-fatal — still send email
-            print(f"🔴 [Step 2/3] Appointment booking failed (non-fatal): {exc}")
+            logger.info(f"🔴 [Step 2/3] Appointment booking failed (non-fatal): {exc}")
     else:
-        print("⚠️  [Step 2/3] calendar_id missing from metadata — skipping appointment creation")
+        logger.info("⚠️  [Step 2/3] calendar_id missing from metadata — skipping appointment creation")
 
     # ────────────────────────────────────────────────────────────────────
     # Step 3: Send confirmation email
     # ────────────────────────────────────────────────────────────────────
-    print(f"\n📧 [Step 3/3] Sending confirmation email to {customer_email}...")
+    logger.info(f"\n📧 [Step 3/3] Sending confirmation email to {customer_email}...")
     try:
         dt = datetime.fromisoformat(booking_slot.replace("Z", "+00:00"))
         booking_date = dt.strftime("%d %B %Y")
@@ -395,9 +398,9 @@ async def stripe_webhook(
             booking_time=booking_time,
             call_summary=call_summary,
         )
-        print(f"✅ [Step 3/3] Confirmation email sent to {customer_email}")
+        logger.info(f"✅ [Step 3/3] Confirmation email sent to {customer_email}")
     except Exception as exc:
-        print(f"🔴 [Step 3/3] Email sending failed (non-fatal): {exc}")
+        logger.info(f"🔴 [Step 3/3] Email sending failed (non-fatal): {exc}")
 
     # ── Print summary to terminal ─────────────────────────────────────────
     summary = (
@@ -416,7 +419,7 @@ async def stripe_webhook(
         f"Call Summary:\n{call_summary}\n"
         f"{'='*60}\n"
     )
-    print(summary)
+    logger.info(summary)
 
     return {
         "received": True,
