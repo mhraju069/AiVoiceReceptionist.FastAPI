@@ -1,6 +1,9 @@
+import logging
 import os
 import httpx
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # AI Model Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -9,13 +12,14 @@ OPENAI_API_URL = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/com
 
 async def generate_ai_response(user_message: str, system_context: Optional[str] = None) -> str:
     """
-    Generates a conversational AI response using standard OpenAI API or simulated responses.
+    Generates a text-based AI response using the OpenAI Chat Completions API.
+    Used for dashboard insights and other non-realtime AI generation tasks.
+    Falls back to a canned response if no API key is set.
     """
     from services.prompts import system_prompt
     if system_context is None:
         system_context = system_prompt()
 
-    # If an API key exists, call real OpenAI API
     if OPENAI_API_KEY:
         payload = {
             "model": "gpt-4o-mini",
@@ -23,7 +27,7 @@ async def generate_ai_response(user_message: str, system_context: Optional[str] 
                 {"role": "system", "content": system_context},
                 {"role": "user", "content": user_message}
             ],
-            "max_tokens": 150
+            "max_tokens": 300
         }
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -31,38 +35,13 @@ async def generate_ai_response(user_message: str, system_context: Optional[str] 
         }
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(OPENAI_API_URL, json=payload, headers=headers, timeout=10.0)
+                response = await client.post(OPENAI_API_URL, json=payload, headers=headers, timeout=15.0)
                 if response.status_code == 200:
                     return response.json()["choices"][0]["message"]["content"]
+                else:
+                    logger.error(f"OpenAI API error {response.status_code}: {response.text}")
         except Exception as e:
-            print(f"Error calling AI API: {e}")
+            logger.error(f"Error calling OpenAI API: {e}")
 
-    # Fallback/Mock conversational AI response logic
-    msg_lower = user_message.lower()
-    if "hello" in msg_lower or "hi" in msg_lower:
-        return "Hello! Thank you for calling Pay Minimum Tax Receptionist. How can I assist you today?"
-    elif "appointment" in msg_lower or "book" in msg_lower:
-        return "I'd be happy to help you book an appointment. May I know your name and preferred date?"
-    elif "pricing" in msg_lower or "cost" in msg_lower:
-        return "Our pricing starts at affordable tiers tailored to your needs. Shall I send you the details?"
-    else:
-        return "I understand. I will make sure our team follows up with you on this. Is there anything else I can assist with?"
-
-
-async def process_incoming_call_event(stream_sid: str, audio_base64: str) -> Optional[str]:
-    """
-    Simulates processing a Twilio live audio stream chunk.
-    It takes the base64 audio string, mimics STT processing, and returns a dynamic AI response.
-    """
-    if not audio_base64:
-        return None
-
-    print(f"[{stream_sid}] Received live audio chunk from caller.")
-    
-    # Simulate converting audio to text
-    user_text = "Hi, I would like to schedule an appointment for next Monday."
-    
-    # Generate conversational AI response
-    ai_text = await generate_ai_response(user_text)
-    print(f"[{stream_sid}] AI generated conversational response: {ai_text}")
-    return ai_text
+    # Fallback response when API key is missing or call fails
+    return "I'm sorry, I'm unable to generate a response right now. Please contact the team directly."

@@ -72,6 +72,83 @@ async def get_contact(contact_id: str):
         else:
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
+async def get_contact_by_phone(phone: str):
+    """Search for a contact by phone number in GHL. Returns raw contact dict."""
+    url = f"{GHL_BASE_URL}/contacts/lookup?phone={phone}"
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, headers=get_ghl_headers())
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("contact"):
+                    return data.get("contact")
+        except Exception as e:
+            logger.error(f"Error looking up contact by phone: {e}")
+    return None
+
+
+async def get_contact_profile_by_phone(phone: str) -> dict:
+    """
+    Returns a structured profile for the AI: name, group (A/B/C/D), 
+    client type, and invoice status from GHL tags.
+    """
+    contact = await get_contact_by_phone(phone)
+    if not contact:
+        return {"found": False, "client_type": "Prospect", "group": None, "name": None}
+
+    first = contact.get("firstName", "") or ""
+    last = contact.get("lastName", "") or ""
+    name = f"{first} {last}".strip() or "Client"
+
+    # Parse tags to determine group and client type
+    raw_tags = contact.get("tags", [])
+    if isinstance(raw_tags, str):
+        tags = [t.strip().upper() for t in raw_tags.split(",")]
+    else:
+        tags = [str(t).strip().upper() for t in raw_tags]
+
+    group = None
+    for g in ["A", "B", "C", "D"]:
+        if any(g == tag or f"GROUP {g}" == tag for tag in tags):
+            group = g
+            break
+
+    client_type = "Prospect"
+    if any("ADHOC" in tag for tag in tags):
+        client_type = "Adhoc"
+    elif group:
+        client_type = f"Class {group} Client"
+
+    invoice_due = any("INVOICE" in tag or "DUE" in tag for tag in tags)
+
+    return {
+        "found": True,
+        "contact_id": contact.get("id"),
+        "name": name,
+        "group": group,
+        "client_type": client_type,
+        "invoice_due": invoice_due,
+        "tags": tags,
+    }
+
+
+async def add_crm_note(contact_id: str, note_body: str) -> bool:
+    """Add a note to a GHL contact — used to record missed call messages."""
+    if not contact_id:
+        return False
+    url = f"{GHL_BASE_URL}/contacts/{contact_id}/notes"
+    payload = {"body": note_body}
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json=payload, headers=get_ghl_headers())
+            if response.status_code in [200, 201]:
+                logger.info(f"✅ [GHL] Note saved for contact {contact_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Error saving CRM note: {e}")
+    return False
+
+
 
 
 async def create_appointment(appointment: AppointmentCreate):

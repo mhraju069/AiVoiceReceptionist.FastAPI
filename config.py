@@ -26,3 +26,8 @@ CALENDAR_OFFICE_CPA_45 = os.getenv("CALENDAR_OFFICE_CPA_45")
 CALENDAR_BEAUTY_SALON_45 = os.getenv("CALENDAR_BEAUTY_SALON_45")
 CALENDAR_TEST = os.getenv("CALENDAR_TEST")
 
+# Call Forwarding Numbers
+FORWARD_SIMON   = os.getenv("FORWARD_SIMON", "")
+FORWARD_TANZINA = os.getenv("FORWARD_TANZINA", "")
+FORWARD_ALEX    = os.getenv("FORWARD_ALEX", "")
+FORWARD_NAFI    = os.getenv("FORWARD_NAFI", "")

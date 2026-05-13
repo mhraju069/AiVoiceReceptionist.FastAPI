@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
 import websockets
 from database import SessionLocal
 from models.activity_models import CallLog
-
+from config import FORWARD_SIMON, FORWARD_TANZINA, FORWARD_ALEX, FORWARD_NAFI
 
 router = APIRouter(
     prefix="/api/twilio",
@@ -17,6 +17,14 @@ router = APIRouter(
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_SID = os.getenv("TWILIO_SID", "")
 TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "")
+
+# Map of forward targets to phone numbers
+FORWARD_MAP = {
+    "simon":   FORWARD_SIMON,
+    "tanzina": FORWARD_TANZINA,
+    "alex":    FORWARD_ALEX,
+    "nafi":    FORWARD_NAFI,
+}
 
 # Configuration for real-time conversational AI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -109,20 +117,80 @@ async def make_outbound_call(request: Request):
             raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/forward-call")
+async def forward_call(request: Request):
+    """
+    TwiML endpoint Twilio calls when redirecting a call to a team member.
+    Reads ?to= from query params and dials that number.
+    """
+    to_number = request.query_params.get("to", "")
+    if not to_number:
+        twiml = """<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, we could not connect your call at this time. Please try again later.</Say></Response>"""
+    else:
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Dial callerId="{TWILIO_NUMBER}" timeout="30" action="/api/twilio/forward-fallback">
+        <Number>{to_number}</Number>
+    </Dial>
+</Response>"""
+    return Response(content=twiml, media_type="text/xml")
+
+
+@router.post("/forward-fallback")
+async def forward_fallback(request: Request):
+    """
+    TwiML endpoint called when the forwarded call ends or is not answered.
+    Plays a fallback message.
+    """
+    twiml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>I'm sorry, the team member is not available right now. Please leave your details and we will call you back shortly.</Say>
+</Response>"""
+    return Response(content=twiml, media_type="text/xml")
+
+
+
 @router.post("/incoming-call")
 async def incoming_call(request: Request):
     form_data = await request.form()
     caller_number = form_data.get("From", "Unknown")
-    
+    from services.ghl import get_contact_profile_by_phone
+    import urllib.parse
+
+    # Full GHL profile lookup
+    contact_name = "Prospect"
+    client_type = "Prospect"
+    group = ""
+    contact_id = ""
+    invoice_due = "false"
+    try:
+        profile = await get_contact_profile_by_phone(caller_number)
+        if profile.get("found"):
+            contact_name = profile.get("name", "Client")
+            client_type = profile.get("client_type", "Prospect")
+            group = profile.get("group") or ""
+            contact_id = profile.get("contact_id") or ""
+            invoice_due = "true" if profile.get("invoice_due") else "false"
+            logger.info(f"📌 [GHL] {caller_number} -> {contact_name} | {client_type} | Group:{group} | Invoice:{invoice_due}")
+    except Exception as e:
+        logger.error(f"Error fetching contact profile: {e}")
+
     # Always wss for public/ngrok hosts, ws only for pure localhost
     is_local = host.startswith("localhost") or host.startswith("127.0.0.1")
     ws_protocol = "ws" if is_local else "wss"
-    stream_url = f"{ws_protocol}://{host}/api/twilio/stream?caller_number={caller_number}"
-    logger.info(f"📞 [Incoming Call] Bridging call from {caller_number} to WebSocket: {stream_url}")
+    params = urllib.parse.urlencode({
+        "caller_number": caller_number,
+        "contact_name": contact_name,
+        "client_type": client_type,
+        "group": group,
+        "contact_id": contact_id,
+        "invoice_due": invoice_due,
+    })
+    stream_url = f"{ws_protocol}://{host}/api/twilio/stream?{params}"
+    logger.info(f"📞 [Incoming] {caller_number} ({contact_name}) -> {stream_url}")
 
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say language="en-US">Hello! Welcome to Pay Minimum Tax. Please wait a moment while I connect you.</Say>
     <Connect>
         <Stream url="{stream_url}" />
     </Connect>
@@ -139,7 +207,12 @@ async def twilio_stream(websocket: WebSocket):
     """
     await websocket.accept()
     caller_number = websocket.query_params.get("caller_number", "Unknown")
-    logger.info(f"\n🔌 [WebSocket] Twilio WebSocket connection accepted from: {caller_number}")
+    contact_name  = websocket.query_params.get("contact_name", "Prospect")
+    client_type   = websocket.query_params.get("client_type", "Prospect")
+    group         = websocket.query_params.get("group", "")
+    contact_id    = websocket.query_params.get("contact_id", "")
+    invoice_due   = websocket.query_params.get("invoice_due", "false") == "true"
+    logger.info(f"\n🎙️ [WebSocket] {caller_number} | {contact_name} | {client_type} | Group:{group} | Invoice:{invoice_due}")
     # Metadata for call logging
     stream_sid = None
     call_sid = None
@@ -165,7 +238,22 @@ async def twilio_stream(websocket: WebSocket):
                 "type": "session.update",
                 "session": {
                     "modalities": ["text", "audio"],
-                    "instructions": system_prompt(),
+                    "instructions": system_prompt() + f"""
+
+                    # CALLER CRM PROFILE (Pre-loaded from GHL)
+                    Caller Name: {contact_name}
+                    Client Type: {client_type}
+                    Group: {group if group else 'Unknown'}
+                    Invoice Due: {'Yes' if invoice_due else 'No'}
+                    Phone: {caller_number}
+
+                    Use this information immediately:
+                    - If Client Type is 'Class A/B/C/D Client', treat as VIP and prioritize Simon transfer.
+                    - If Invoice Due is Yes, mention it politely when relevant.
+                    - If the caller is a known client, address them by name without asking.
+                    - If Prospect, follow the standard intro and qualification workflow.
+                    """,
+                    
                     "voice": "alloy",
                     "input_audio_format": "g711_ulaw",
                     "output_audio_format": "g711_ulaw",
@@ -175,9 +263,10 @@ async def twilio_stream(websocket: WebSocket):
                     # Auto-detect when the caller finishes speaking and trigger a response
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.7,
+                        "threshold": 0.5,
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 600
+                        "silence_duration_ms": 500,
+                        "create_response": True,
                     },
                     "tools": [
                         {
@@ -216,6 +305,41 @@ async def twilio_stream(websocket: WebSocket):
                                 },
                                 "required": ["name", "email", "phone", "booking_slot", "calendar_type", "call_summary"]
                             }
+                        },
+                        {
+                            "type": "function",
+                            "name": "transfer_call",
+                            "description": "Transfer the current live call to a human team member. Use this when the caller is a VIP/class client or explicitly requests to speak to someone.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "target": {
+                                        "type": "string",
+                                        "enum": ["simon", "tanzina", "alex", "nafi"],
+                                        "description": "The team member to transfer the call to. Use 'simon' for VIP/class clients. Use 'tanzina', 'alex', or 'nafi' for standard transfers."
+                                    },
+                                    "reason": {
+                                        "type": "string",
+                                        "description": "Brief reason for the transfer."
+                                    }
+                                },
+                                "required": ["target", "reason"]
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "record_message",
+                            "description": "Record a caller's message in the CRM when no team member is available. Call this after the caller leaves their message.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "caller_name":   {"type": "string", "description": "Name of the caller"},
+                                    "caller_phone":  {"type": "string", "description": "Phone number of the caller"},
+                                    "message":       {"type": "string", "description": "The message or reason the caller left"},
+                                    "call_reason":   {"type": "string", "description": "Category: personal_tax, business_tax, notice, appointment, other"}
+                                },
+                                "required": ["caller_name", "caller_phone", "message", "call_reason"]
+                            }
                         }
                     ],
                     "tool_choice": "auto"
@@ -224,12 +348,25 @@ async def twilio_stream(websocket: WebSocket):
             await openai_ws.send(json.dumps(session_update))
             logger.info("📝 [OpenAI] Sent session configuration update with turn detection.")
 
-            # Trigger an initial greeting in Bangla immediately
+            # Trigger initial greeting based on caller profile
+            is_known = client_type != "Prospect"
+            if is_known:
+                greeting_instruction = (
+                    f"The caller is {contact_name}, a {client_type} of Pay Minimum Tax. "
+                    f"Greet them with an Islamic greeting by name in Dhaka Bangla. "
+                    f"Say: আসসালামু আলাইকুম {contact_name} ভাই, আমি রেবা, আপনার জন্য আজ কি করতে পারি?"
+                )
+            else:
+                greeting_instruction = (
+                    "The caller is a new prospect. "
+                    "Greet them with the standard PMT greeting in Dhaka Bangla: "
+                    "ধন্যবাদ Pay Minimum Tax এ কল করার জন্য। আমি রেবা বলছি। কিভাবে সাহায্য করতে পারি?"
+                )
             initial_greeting = {
                 "type": "response.create",
                 "response": {
                     "modalities": ["text", "audio"],
-                    "instructions": "Greet the caller in Dhaka Bangla warmly. Your name is Reba. Say: ধন্যবাদ, আমি রেবা বলছি Pay Minimum Tax থেকে। আপনাকে কিভাবে সাহায্য করতে পারি?"
+                    "instructions": greeting_instruction
                 }
             }
             await openai_ws.send(json.dumps(initial_greeting))
@@ -300,12 +437,27 @@ async def twilio_stream(websocket: WebSocket):
             return
 
         openai_media_count = 0
+        current_response_id = None   # Track which response is actively generating
+        interrupted_ids = set()      # Set of response IDs that have been cancelled
         try:
             async for openai_message in openai_ws:
                 openai_data = json.loads(openai_message)
+                event_type = openai_data.get("type", "")
+
+                # Track when a new response starts generating
+                if event_type == "response.created":
+                    resp_obj = openai_data.get("response", {})
+                    current_response_id = resp_obj.get("id")
+                    logger.info(f"🟢 [OpenAI] New response started: {current_response_id}")
 
                 # Process assistant's generated audio response
-                if openai_data.get("type") == "response.audio.delta":
+                elif event_type == "response.audio.delta":
+                    resp_id = openai_data.get("response_id") or current_response_id
+
+                    # DROP audio chunks from a cancelled/interrupted response
+                    if resp_id and resp_id in interrupted_ids:
+                        continue
+
                     audio_chunk = openai_data["delta"]
                     openai_media_count += 1
 
@@ -321,37 +473,54 @@ async def twilio_stream(websocket: WebSocket):
                             }
                         }
                         await websocket.send_text(json.dumps(twilio_payload))
-                
-                # Handle user interruption: Stop AI audio playback immediately
-                elif openai_data.get("type") == "input_audio_buffer.speech_started":
-                    logger.info("🛑 [OpenAI] User interrupted! Clearing Twilio audio buffer...")
+
+                # Handle user interruption: Cancel AI response AND clear Twilio buffer
+                elif event_type == "input_audio_buffer.speech_started":
+                    logger.info("🛑 [OpenAI] User interrupted! Cancelling AI response & clearing Twilio buffer...")
+
+                    # 1) Tell OpenAI to STOP generating the current response
+                    try:
+                        await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                        logger.info("🛑 [OpenAI] Sent response.cancel to stop AI generation.")
+                    except Exception as cancel_err:
+                        logger.error(f"🔴 [OpenAI] Failed to send response.cancel: {cancel_err}")
+
+                    # 2) Mark the current response as interrupted so remaining chunks are dropped
+                    if current_response_id:
+                        interrupted_ids.add(current_response_id)
+                        logger.info(f"🛑 [OpenAI] Marked response {current_response_id} as interrupted.")
+
+                    # 3) Clear Twilio's playback buffer so queued audio stops immediately
                     if stream_sid:
                         await websocket.send_text(json.dumps({
                             "event": "clear",
                             "streamSid": stream_sid
                         }))
+                        logger.info("🧹 [Twilio] Cleared audio playback buffer.")
+
+                # Clean up interrupted_ids when a response finishes (done or cancelled)
+                elif event_type in ("response.done", "response.cancelled"):
+                    resp_obj = openai_data.get("response", {})
+                    done_id = resp_obj.get("id") or current_response_id
+                    interrupted_ids.discard(done_id)
+                    logger.info(f"✅ [OpenAI] Response {done_id} finished ({event_type}).")
                 
                 # Additional debug logging for other important OpenAI events
-                elif openai_data.get("type") in ["response.text.done", "response.audio_transcript.done"]:
+                elif event_type in ("response.text.done", "response.audio_transcript.done"):
                     text = openai_data.get("text") or openai_data.get("transcript")
                     if text:
                         logger.info(f"\n🤖 [AI Reply]: {text}")
+                        transcript_accumulator.append(f"AI: {text}")
                 
                 # Catch the user's speech transcript
-                elif openai_data.get("type") == "conversation.item.input_audio_transcription.completed":
+                elif event_type == "conversation.item.input_audio_transcription.completed":
                     user_text = openai_data.get("transcript")
                     if user_text:
                         logger.info(f"\n👤 [Caller]: {user_text}")
                         transcript_accumulator.append(f"Caller: {user_text}")
 
-                # Catch AI's speech transcript
-                elif openai_data.get("type") == "response.audio_transcript.done":
-                    ai_text = openai_data.get("transcript")
-                    if ai_text:
-                        transcript_accumulator.append(f"AI: {ai_text}")
-
                 # Handle tool calls
-                elif openai_data.get("type") == "response.function_call_arguments.done":
+                elif event_type == "response.function_call_arguments.done":
                     func_name = openai_data.get("name")
                     call_id = openai_data.get("call_id")
                     args = json.loads(openai_data.get("arguments", "{}"))
@@ -383,8 +552,62 @@ async def twilio_stream(websocket: WebSocket):
                         except Exception as e:
                             result = {"status": "error", "message": "Could not fetch available slots."}
                             logger.info(f"🔴 [OpenAI] Slot fetch exception: {e}")
-                    
+
+                    elif func_name == "transfer_call":
+                        target = args.get("target", "tanzina").lower()
+                        reason = args.get("reason", "")
+                        to_number = FORWARD_MAP.get(target, "")
+                        logger.info(f"📲 [Transfer] AI requested transfer to '{target}' ({to_number}). Reason: {reason}")
+
+                        if not to_number:
+                            result = {"status": "error", "message": f"No phone number configured for {target}."}
+                            logger.error(f"🔴 [Transfer] No number configured for '{target}'.")
+                        elif not call_sid:
+                            result = {"status": "error", "message": "Call SID not available yet to redirect."}
+                            logger.error("🔴 [Transfer] call_sid is None, cannot redirect.")
+                        else:
+                            try:
+                                # Build the forward TwiML URL — must be publicly accessible
+                                host = os.getenv("PUBLIC_HOST", "")
+                                forward_url = f"https://{host}/api/twilio/forward-call?to={to_number}"
+                                redirect_payload = {"Url": forward_url, "Method": "POST"}
+                                redirect_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Calls/{call_sid}.json"
+                                auth = (TWILIO_SID, TWILIO_AUTH_TOKEN)
+                                async with httpx.AsyncClient() as client:
+                                    resp = await client.post(redirect_url, data=redirect_payload, auth=auth)
+                                if resp.status_code == 200:
+                                    result = {"status": "success", "message": f"Transferring call to {target}."}
+                                    logger.info(f"✅ [Transfer] Successfully redirected call to {target}.")
+                                else:
+                                    result = {"status": "error", "message": f"Twilio redirect failed: {resp.text}"}
+                                    logger.error(f"🔴 [Transfer] Twilio API error: {resp.text}")
+                            except Exception as e:
+                                result = {"status": "error", "message": "Transfer failed due to a technical error."}
+                                logger.error(f"🔴 [Transfer] Exception during transfer: {e}")
+
+                    elif func_name == "record_message":
+                        caller_name_arg  = args.get("caller_name", contact_name)
+                        caller_phone_arg = args.get("caller_phone", caller_number)
+                        message_text     = args.get("message", "")
+                        call_reason_arg  = args.get("call_reason", "other")
+                        logger.info(f"📝 [CRM] Recording message from {caller_name_arg}: {message_text}")
+                        note = (
+                            f"📞 Missed Call Note\n"
+                            f"Name: {caller_name_arg}\n"
+                            f"Phone: {caller_phone_arg}\n"
+                            f"Reason: {call_reason_arg}\n"
+                            f"Message: {message_text}"
+                        )
+                        from services.ghl import add_crm_note
+                        saved = await add_crm_note(contact_id, note)
+                        if saved:
+                            result = {"status": "success", "message": "Message recorded in CRM."}
+                        else:
+                            logger.info(f"📝 [CRM] No contact ID, logging locally: {note}")
+                            result = {"status": "success", "message": "Message noted. Team will follow up."}
+
                     # Send output back to OpenAI
+
                     await openai_ws.send(json.dumps({
                         "type": "conversation.item.create",
                         "item": {
