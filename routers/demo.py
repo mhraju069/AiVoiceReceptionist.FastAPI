@@ -28,7 +28,7 @@ debug_clients: List[WebSocket] = []
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_WS_URL = os.getenv(
     "OPENAI_WS_URL",
-    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 )
 
 
@@ -131,9 +131,9 @@ async def demo_voice_stream(websocket: WebSocket):
                         "input_audio_transcription": {"model": "whisper-1"},
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": 0.7,
+                            "threshold": 0.5,
                             "prefix_padding_ms": 300,
-                            "silence_duration_ms": 1200
+                            "silence_duration_ms": 500
                         },
                         "tools": [
                             {
@@ -184,7 +184,7 @@ async def demo_voice_stream(websocket: WebSocket):
                     "type": "response.create",
                     "response": {
                         "modalities": ["text", "audio"],
-                        "instructions": "Greet the caller warmly in Dhaka Bangla using the standard greeting: ধন্যবাদ Pay Minimum Tax এ কল করার জন্য। আমি রেবা বলছি। কিভাবে সাহায্য করতে পারি?"
+                        "instructions": "Greet the caller using the greeting specified in the GREETING section of your system instructions. Speak it naturally and warmly."
                     }
                 }
                 await openai_ws.send(json.dumps(initial_greeting))
@@ -247,36 +247,74 @@ async def demo_voice_stream(websocket: WebSocket):
                 return
 
             ai_chunk_count = 0
+            is_interrupted = False
+            last_assistant_item_id = None
+            response_audio_sent_ms = 0
             try:
                 async for openai_message in openai_ws:
                     if call_done.is_set():
                         break
                     openai_data = json.loads(openai_message)
+                    evt = openai_data.get("type", "")
 
-                    if openai_data.get("type") == "response.audio.delta":
+                    if evt == "response.created":
+                        is_interrupted = False
+                        response_audio_sent_ms = 0
+
+                    elif evt == "response.audio.delta":
+                        if is_interrupted:
+                            continue
+                        item_id = openai_data.get("item_id")
+                        if item_id:
+                            last_assistant_item_id = item_id
                         ai_chunk_count += 1
+                        # Track audio duration (PCM16 24kHz: 2 bytes/sample, 24000 samples/s = 48 bytes/ms)
+                        try:
+                            raw_bytes = len(base64.b64decode(openai_data["delta"]))
+                            response_audio_sent_ms += raw_bytes / 48
+                        except Exception:
+                            response_audio_sent_ms += 20
                         await _send({"type": "audio", "data": openai_data["delta"]})
                         if ai_chunk_count % 50 == 0:
                             await _debug("ai_audio", f"🎙️ Streamed {ai_chunk_count} AI audio chunks")
 
-                    elif openai_data.get("type") in ["response.text.done", "response.audio_transcript.done"]:
+                    elif evt in ["response.text.done", "response.audio_transcript.done"]:
                         text = openai_data.get("text") or openai_data.get("transcript")
                         if text:
                             ai_transcripts.append(text)
                             await _debug("ai_transcript", f"🤖 AI: {text}")
                             await _send({"type": "transcript", "role": "assistant", "text": text})
 
-                    elif openai_data.get("type") == "conversation.item.input_audio_transcription.completed":
+                    elif evt == "conversation.item.input_audio_transcription.completed":
                         user_text = openai_data.get("transcript")
                         if user_text:
                             user_transcripts.append(user_text)
                             await _debug("user_transcript", f"👤 User: {user_text}")
                             await _send({"type": "transcript", "role": "user", "text": user_text})
 
-                    elif openai_data.get("type") == "input_audio_buffer.speech_started":
-                        await _debug("vad_speech_started", "🎤 Speech detected...")
+                    elif evt == "input_audio_buffer.speech_started":
+                        await _debug("vad_speech_started", "🎤 Speech detected — interrupting AI...")
+                        is_interrupted = True
+                        # Tell browser to stop playing queued audio
+                        await _send({"type": "interrupt"})
+                        # Cancel OpenAI response
+                        try:
+                            await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                        except Exception:
+                            pass
+                        # Truncate conversation item
+                        if last_assistant_item_id:
+                            try:
+                                await openai_ws.send(json.dumps({
+                                    "type": "conversation.item.truncate",
+                                    "item_id": last_assistant_item_id,
+                                    "content_index": 0,
+                                    "audio_end_ms": int(response_audio_sent_ms)
+                                }))
+                            except Exception:
+                                pass
 
-                    elif openai_data.get("type") == "input_audio_buffer.speech_stopped":
+                    elif evt == "input_audio_buffer.speech_stopped":
                         await _debug("vad_speech_stopped", "🔇 Speech ended, processing...")
 
                     elif openai_data.get("type") == "response.function_call_arguments.done":

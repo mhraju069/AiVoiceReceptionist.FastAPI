@@ -30,7 +30,7 @@ FORWARD_MAP = {
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_WS_URL = os.getenv(
     "OPENAI_WS_URL", 
-    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 )
 
 
@@ -51,7 +51,7 @@ async def create_session():
     }
     
     data = {
-        "model": "gpt-4o-realtime-preview-2024-12-17",
+        "model": "gpt-4o-realtime-preview",
         "modalities": ["audio", "text"],
         "voice": "alloy",
         "instructions": system_prompt(),
@@ -152,6 +152,7 @@ async def forward_fallback(request: Request):
 
 @router.post("/incoming-call")
 async def incoming_call(request: Request):
+    host = request.headers.get("host", str(request.base_url.hostname))
     form_data = await request.form()
     caller_number = form_data.get("From", "Unknown")
     from services.ghl import get_contact_profile_by_phone
@@ -249,7 +250,7 @@ async def twilio_stream(websocket: WebSocket):
 
                     Use this information immediately:
                     - If Client Type is 'Class A/B/C/D Client', treat as VIP and prioritize Simon transfer.
-                    - If Invoice Due is Yes, mention it politely when relevant.
+                    - If Invoice Due is Yes, include it in the internal staff handoff note only. Never mention invoices or billing to the caller directly.
                     - If the caller is a known client, address them by name without asking.
                     - If Prospect, follow the standard intro and qualification workflow.
                     """,
@@ -264,8 +265,8 @@ async def twilio_stream(websocket: WebSocket):
                     "turn_detection": {
                         "type": "server_vad",
                         "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500,
+                        "prefix_padding_ms": 400,
+                        "silence_duration_ms": 300,
                         "create_response": True,
                     },
                     "tools": [
@@ -359,8 +360,7 @@ async def twilio_stream(websocket: WebSocket):
             else:
                 greeting_instruction = (
                     "The caller is a new prospect. "
-                    "Greet them with the standard PMT greeting in Dhaka Bangla: "
-                    "ধন্যবাদ Pay Minimum Tax এ কল করার জন্য। আমি রেবা বলছি। কিভাবে সাহায্য করতে পারি?"
+                    "Greet them using the greeting specified in the GREETING section of your system instructions. Speak naturally and warmly."
                 )
             initial_greeting = {
                 "type": "response.create",
@@ -379,7 +379,7 @@ async def twilio_stream(websocket: WebSocket):
         logger.info("⚠️ [OpenAI] OPENAI_API_KEY not found. Operating in fallback mode.")
 
     async def receive_from_twilio():
-        nonlocal stream_sid
+        nonlocal stream_sid, call_sid, caller_number
         media_count = 0
         try:
             while True:
@@ -438,7 +438,9 @@ async def twilio_stream(websocket: WebSocket):
 
         openai_media_count = 0
         current_response_id = None   # Track which response is actively generating
-        interrupted_ids = set()      # Set of response IDs that have been cancelled
+        last_assistant_item_id = None  # Track current assistant item for truncation
+        response_audio_sent_ms = 0   # Cumulative ms of audio sent to Twilio
+        is_interrupted = False       # Flag to immediately drop audio on interruption
         try:
             async for openai_message in openai_ws:
                 openai_data = json.loads(openai_message)
@@ -448,18 +450,31 @@ async def twilio_stream(websocket: WebSocket):
                 if event_type == "response.created":
                     resp_obj = openai_data.get("response", {})
                     current_response_id = resp_obj.get("id")
+                    is_interrupted = False  # Allow audio for this new response
+                    response_audio_sent_ms = 0  # Reset audio counter
                     logger.info(f"🟢 [OpenAI] New response started: {current_response_id}")
 
                 # Process assistant's generated audio response
                 elif event_type == "response.audio.delta":
-                    resp_id = openai_data.get("response_id") or current_response_id
-
-                    # DROP audio chunks from a cancelled/interrupted response
-                    if resp_id and resp_id in interrupted_ids:
+                    # DROP all audio chunks if caller interrupted
+                    if is_interrupted:
                         continue
+
+                    # Track item_id for conversation truncation on interruption
+                    item_id = openai_data.get("item_id")
+                    if item_id:
+                        last_assistant_item_id = item_id
 
                     audio_chunk = openai_data["delta"]
                     openai_media_count += 1
+
+                    # Track audio duration for accurate truncation
+                    # G.711 μ-law: 8000 Hz, 1 byte/sample → 8 bytes per ms
+                    try:
+                        raw_bytes = len(base64.b64decode(audio_chunk))
+                        response_audio_sent_ms += raw_bytes / 8
+                    except Exception:
+                        response_audio_sent_ms += 20  # ~20ms fallback
 
                     if openai_media_count % 100 == 0:
                         logger.info(f"🎙️ [OpenAI -> Server] Received {openai_media_count} audio chunks from AI...")
@@ -474,23 +489,12 @@ async def twilio_stream(websocket: WebSocket):
                         }
                         await websocket.send_text(json.dumps(twilio_payload))
 
-                # Handle user interruption: Cancel AI response AND clear Twilio buffer
+                # Handle user interruption: Stop AI and clear Twilio buffer
                 elif event_type == "input_audio_buffer.speech_started":
-                    logger.info("🛑 [OpenAI] User interrupted! Cancelling AI response & clearing Twilio buffer...")
+                    logger.info("🛑 [OpenAI] User interrupted! Stopping AI immediately...")
+                    is_interrupted = True
 
-                    # 1) Tell OpenAI to STOP generating the current response
-                    try:
-                        await openai_ws.send(json.dumps({"type": "response.cancel"}))
-                        logger.info("🛑 [OpenAI] Sent response.cancel to stop AI generation.")
-                    except Exception as cancel_err:
-                        logger.error(f"🔴 [OpenAI] Failed to send response.cancel: {cancel_err}")
-
-                    # 2) Mark the current response as interrupted so remaining chunks are dropped
-                    if current_response_id:
-                        interrupted_ids.add(current_response_id)
-                        logger.info(f"🛑 [OpenAI] Marked response {current_response_id} as interrupted.")
-
-                    # 3) Clear Twilio's playback buffer so queued audio stops immediately
+                    # 1) Clear Twilio's playback buffer FIRST — stop caller hearing AI
                     if stream_sid:
                         await websocket.send_text(json.dumps({
                             "event": "clear",
@@ -498,11 +502,31 @@ async def twilio_stream(websocket: WebSocket):
                         }))
                         logger.info("🧹 [Twilio] Cleared audio playback buffer.")
 
-                # Clean up interrupted_ids when a response finishes (done or cancelled)
+                    # 2) Cancel the current OpenAI response generation
+                    try:
+                        await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                        logger.info("🛑 [OpenAI] Sent response.cancel to stop AI generation.")
+                    except Exception as cancel_err:
+                        logger.error(f"🔴 [OpenAI] Failed to send response.cancel: {cancel_err}")
+
+                    # 3) Truncate the conversation so OpenAI only remembers what
+                    #    the caller actually heard (not the full unplayed response)
+                    if last_assistant_item_id:
+                        try:
+                            await openai_ws.send(json.dumps({
+                                "type": "conversation.item.truncate",
+                                "item_id": last_assistant_item_id,
+                                "content_index": 0,
+                                "audio_end_ms": int(response_audio_sent_ms)
+                            }))
+                            logger.info(f"✂️ [OpenAI] Truncated item at {int(response_audio_sent_ms)}ms")
+                        except Exception as trunc_err:
+                            logger.error(f"🔴 [OpenAI] Failed to truncate: {trunc_err}")
+
+                # Log when a response finishes
                 elif event_type in ("response.done", "response.cancelled"):
                     resp_obj = openai_data.get("response", {})
                     done_id = resp_obj.get("id") or current_response_id
-                    interrupted_ids.discard(done_id)
                     logger.info(f"✅ [OpenAI] Response {done_id} finished ({event_type}).")
                 
                 # Additional debug logging for other important OpenAI events
@@ -668,31 +692,36 @@ async def twilio_stream(websocket: WebSocket):
                         outcome = analysis.get("outcome", outcome)
                         lead_status = analysis.get("lead_status")
                         tags = ",".join(analysis.get("tags", []))
-                    except:
+                    except Exception as e:
                         reason = "Inquiry"
                         lead_status = "Inquiry"
                         tags = ""
 
                 db = SessionLocal()
-                new_log = CallLog(
-                    call_sid=call_sid or stream_sid,
-                    caller_number=caller_number,
-                    transcript=full_transcript,
-                    summary=summary,
-                    reason=reason,
-                    intent=intent,
-                    outcome=outcome,
-                    lead_status=lead_status,
-                    tags=tags,
-                    start_time=start_time_dt,
-                    end_time=datetime.datetime.utcnow(),
-                    duration=int((datetime.datetime.utcnow() - start_time_dt).total_seconds())
-                )
-                db.add(new_log)
-                db.commit()
-                db.close()
-                logger.info(f"💾 [Database] Call log saved for SID: {call_sid or stream_sid}")
+                try:
+                    new_log = CallLog(
+                        call_sid=call_sid or stream_sid,
+                        caller_number=caller_number,
+                        transcript=full_transcript,
+                        summary=summary,
+                        reason=reason,
+                        intent=intent,
+                        outcome=outcome,
+                        lead_status=lead_status,
+                        tags=tags,
+                        start_time=start_time_dt,
+                        end_time=datetime.datetime.utcnow(),
+                        duration=int((datetime.datetime.utcnow() - start_time_dt).total_seconds())
+                    )
+                    db.add(new_log)
+                    db.commit()
+                    logger.info(f"💾 [Database] Call log saved for SID: {call_sid or stream_sid}")
+                except Exception as db_err:
+                    logger.error(f"🔴 [Database] Error saving call log: {db_err}")
+                    db.rollback()
+                finally:
+                    db.close()
             except Exception as e:
-                logger.info(f"🔴 [Database] Error saving call log: {e}")
+                logger.error(f"🔴 [Database] Error in post-call processing: {e}")
 
         logger.info("Bidirectional voice session closed.")
