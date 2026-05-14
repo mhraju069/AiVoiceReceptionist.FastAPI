@@ -10,10 +10,12 @@ import json
 import base64
 import asyncio
 import time
+import websockets
 from datetime import datetime
 from typing import List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
+from services.prompts import system_prompt
 
 router = APIRouter(
     prefix="/api/demo",
@@ -97,7 +99,6 @@ async def demo_voice_stream(websocket: WebSocket):
         # ── Try connecting to OpenAI ──
         if OPENAI_API_KEY:
             try:
-                import websockets
                 await _debug("openai_connecting", "🤖 Connecting to OpenAI Realtime API...")
 
                 headers = {
@@ -107,13 +108,23 @@ async def demo_voice_stream(websocket: WebSocket):
                 openai_ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
                 await _debug("openai_connected", "🟢 OpenAI Realtime API connected!")
 
-                from services.prompts import system_prompt
-
                 session_update = {
                     "type": "session.update",
                     "session": {
                         "modalities": ["text", "audio"],
-                        "instructions": system_prompt(),
+                        "instructions": system_prompt() 
+                        # + """
+
+                        # # CALLER CRM PROFILE (Simulated for Demo)
+                        # Caller Name: Test Simon (Demo User)
+                        # Client Type: Class A Client
+                        # Group: A
+                        # Invoice Due: No
+                        # Phone: +1234567890
+
+                        # Note: Since this is a Demo session, assume the user is this Class A Client. Greet them by name and handle as VIP.
+                        # """
+                        ,
                         "voice": "alloy",
                         "input_audio_format": "pcm16",
                         "output_audio_format": "pcm16",
@@ -173,7 +184,7 @@ async def demo_voice_stream(websocket: WebSocket):
                     "type": "response.create",
                     "response": {
                         "modalities": ["text", "audio"],
-                        "instructions": "Greet the caller warmly. Say: Hello! I'm the AI receptionist for Pay Minimum Tax. How can I help you today?"
+                        "instructions": "Greet the caller warmly in Dhaka Bangla using the standard greeting: ধন্যবাদ Pay Minimum Tax এ কল করার জন্য। আমি রেবা বলছি। কিভাবে সাহায্য করতে পারি?"
                     }
                 }
                 await openai_ws.send(json.dumps(initial_greeting))
