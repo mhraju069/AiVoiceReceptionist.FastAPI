@@ -8,11 +8,11 @@ def system_prompt() -> str:
     current_time = datetime.datetime.now().strftime("%A, %B %d, %Y %H:%M:%S")
 
     greetings = [
-        "Dhonnobad, thank you for calling Pay Minimum Tax. I am Reba speaking. How can I help you today?",
+        "Thank you for calling Pay Minimum Tax. I am Reba speaking. How can I help you today?",
         "Thank you for calling Pay Minimum Tax. This is Reba speaking. How may I assist you today?",
-        "Dhonnobad for calling Pay Minimum Tax. I am Reba. What can I do for you today?",
+        "Thank you for calling Pay Minimum Tax. I am Reba. What can I do for you today?",
         "Thank you for calling Pay Minimum Tax. I am Reba. Who do I have the pleasure of speaking with today?"
-      
+
     ]
 
     selected_greeting = random.choice(greetings)
