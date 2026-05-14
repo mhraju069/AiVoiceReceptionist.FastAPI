@@ -1,12 +1,140 @@
-Pay Minimum Tax is a premier tax consultancy firm specializing in legal tax minimization strategies. Our primary goal is to help individuals and businesses pay the absolute minimum tax required by law through advanced planning and strategy.
-Office Hours: Monday to Friday, 9:00 AM to 6:00 PM. We are closed on weekends.
-Contact Details:
-- Phone: +1-800-555-0199
-- Email: contact@payminimumtax.com
-- Website: www.payminimumtax.com
-Our services:
-- Strategic Tax Planning & Consulting
-- Personal & Business Tax Preparation
-- Tax Audit Representation
-- Legal Wealth & Asset Protection
-- Expert Tax Minimization Advice
+== COMPANY OVERVIEW ==
+Pay Minimum Tax (PMT) is a premier tax consultancy firm specializing in legal tax minimization strategies. Our goal is to help individuals and businesses pay the absolute minimum tax required by law, through advanced planning, strategy, and expert guidance.
+
+== OFFICE HOURS ==
+Monday to Friday: 9:00 AM to 6:00 PM (Eastern Time)
+Saturday: Closed
+Sunday: Closed
+We observe all US Federal holidays.
+
+== CONTACT INFORMATION ==
+Phone: +1-800-555-0199
+Email: contact@payminimumtax.com
+Website: www.payminimumtax.com
+
+== SERVICES ==
+1. Strategic Tax Planning & Consulting
+   - Long-term and short-term tax minimization strategy
+   - Personalized tax roadmaps for individuals and businesses
+
+2. Personal Tax Preparation
+   - Federal and state tax return filing
+   - W-2 employees, freelancers, and self-employed individuals
+   - Multiple state returns
+
+3. Business Tax Preparation
+   - LLC, S-Corp, C-Corp, and Partnership returns
+   - Multi-entity tax structuring
+   - Federal and state business filings
+
+4. IRS Audit Representation & Compliance
+   - Full representation during IRS audits
+   - Response to IRS notices and letters
+   - Penalty abatement requests
+
+5. Payroll Services
+   - Payroll processing and tax filings
+   - Payroll compliance and reporting
+   - Employee classification review
+
+6. Sales Tax & Meals Tax Filing
+   - State sales tax registration and filing
+   - Meals tax compliance for restaurants and food businesses
+
+7. Legal Wealth & Asset Protection
+   - Trust and estate planning coordination
+   - Asset protection strategies
+   - Coordination with legal counsel
+
+8. Expert Tax Minimization Advice
+   - Proactive year-round tax planning
+   - Tax-saving opportunity identification
+   - Business structure optimization
+
+== STAFF ==
+- Simon: Senior Partner / Lead CPA — handles VIP and Class A clients, complex strategy, and escalations
+- Tanzina: Client Relations Manager — primary point of contact for most client inquiries and scheduling
+- Alex: Tax Associate — handles follow-ups, standard client calls, and document requests
+- Nafi: Junior Associate — supports general inquiries, scheduling, and administrative tasks
+- Reba: AI Front-Desk Receptionist — handles initial call routing, appointment booking, and general inquiries
+
+Note: Always route through Reba (AI) first. Never give out direct staff personal contact information.
+
+== APPOINTMENT TYPES ==
+1. Follow-Up Call (10 minutes)
+   - For existing clients who need a quick check-in or follow-up
+   - Class B, C, D clients
+
+2. Virtual Consultation (15 minutes)
+   - For new prospects exploring services
+   - General inquiries requiring more than a quick answer
+
+3. Virtual CPA Consultation (45 minutes)
+   - For complex tax situations, planning sessions, or new business clients
+   - Conducted via video or phone
+
+4. In-Office CPA Consultation (45 minutes)
+   - In-person meeting at our office
+   - For clients who prefer face-to-face meetings
+
+5. Demo/Test Booking
+   - For system testing purposes only
+
+== PRICING POLICY ==
+Pricing varies depending on the complexity of the engagement and type of service.
+Reba cannot confirm or quote specific prices on calls.
+All pricing discussions are handled directly by our team during consultations.
+
+== BOOKING POLICY ==
+- Appointments can be booked via the receptionist or online
+- Cancellations require at least 24 hours notice
+- Late arrivals may result in a shortened appointment
+- Some consultations may require a deposit to confirm
+
+== PAYMENT METHODS ==
+- Credit card (Visa, MasterCard, American Express)
+- Bank transfer (ACH)
+- Check (payable to Pay Minimum Tax)
+- Online payment via secure client portal
+
+== CLIENT TIERS ==
+- VIP / Class A: Premium clients with direct Simon access and priority scheduling
+- Class B: Established clients with full service access
+- Class C: Standard clients
+- Class D: Occasional or project-based clients
+- Prospect: New callers who have not yet become clients
+
+== FREQUENTLY ASKED QUESTIONS ==
+
+Q: What documents do I need for tax preparation?
+A: Generally, W-2s, 1099s, prior year tax returns, receipts for deductions, and any investment statements. Our team will provide a full checklist during your consultation.
+
+Q: How long does tax preparation take?
+A: It depends on the complexity. Simple returns may take a few days. Complex business returns may take one to two weeks.
+
+Q: Can you handle both personal and business taxes?
+A: Yes. We handle personal, business, and multi-entity tax situations.
+
+Q: Do you work with clients remotely?
+A: Yes. We work with clients across the United States. Most services are available virtually via phone or video call.
+
+Q: What if I received an IRS notice?
+A: Do not ignore it. Contact us immediately. We provide full IRS audit representation and response services.
+
+Q: Can I get help with back taxes?
+A: Yes. We assist clients with unfiled returns, back taxes, and IRS payment plan negotiations. Please let our team know your situation so they can advise accordingly.
+
+Q: Are your services confidential?
+A: Absolutely. All client information is handled with strict confidentiality in accordance with professional standards and applicable law.
+
+Q: How do I schedule an appointment?
+A: You can schedule through Reba (this receptionist), through our website, or by speaking with our team directly.
+
+== WHAT REBA CANNOT ANSWER ==
+- Specific pricing or fee quotes
+- Specific tax advice or calculations
+- Legal advice
+- Information about specific client accounts
+- Anything not covered in this knowledge base
+
+If asked about any of the above, Reba should offer to have a team member follow up.

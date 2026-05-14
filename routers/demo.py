@@ -131,7 +131,7 @@ async def demo_voice_stream(websocket: WebSocket):
                         "input_audio_transcription": {"model": "whisper-1"},
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": 0.5,
+                            "threshold": 0.6,
                             "prefix_padding_ms": 300,
                             "silence_duration_ms": 500
                         },
@@ -247,7 +247,8 @@ async def demo_voice_stream(websocket: WebSocket):
                 return
 
             ai_chunk_count = 0
-            is_interrupted = False
+            # asyncio.Event for atomic cross-coroutine interrupt signaling
+            interrupt_event = asyncio.Event()
             last_assistant_item_id = None
             response_audio_sent_ms = 0
             try:
@@ -258,11 +259,11 @@ async def demo_voice_stream(websocket: WebSocket):
                     evt = openai_data.get("type", "")
 
                     if evt == "response.created":
-                        is_interrupted = False
+                        interrupt_event.clear()  # Allow audio for this new response
                         response_audio_sent_ms = 0
 
                     elif evt == "response.audio.delta":
-                        if is_interrupted:
+                        if interrupt_event.is_set():
                             continue
                         item_id = openai_data.get("item_id")
                         if item_id:
@@ -294,9 +295,17 @@ async def demo_voice_stream(websocket: WebSocket):
 
                     elif evt == "input_audio_buffer.speech_started":
                         await _debug("vad_speech_started", "🎤 Speech detected — interrupting AI...")
-                        is_interrupted = True
-                        # Tell browser to stop playing queued audio
-                        await _send({"type": "interrupt"})
+                        # Set atomically — any concurrent audio.delta checks see this instantly
+                        interrupt_event.set()
+
+                        # Fire-and-forget: tell browser to stop playing queued audio
+                        async def _notify_interrupt():
+                            try:
+                                await _send({"type": "interrupt"})
+                            except Exception:
+                                pass
+                        asyncio.create_task(_notify_interrupt())
+
                         # Cancel OpenAI response
                         try:
                             await openai_ws.send(json.dumps({"type": "response.cancel"}))
@@ -316,6 +325,10 @@ async def demo_voice_stream(websocket: WebSocket):
 
                     elif evt == "input_audio_buffer.speech_stopped":
                         await _debug("vad_speech_stopped", "🔇 Speech ended, processing...")
+
+                    # Response finished or cancelled — clear interrupt so next response plays normally
+                    elif evt in ("response.done", "response.cancelled"):
+                        interrupt_event.clear()
 
                     elif openai_data.get("type") == "response.function_call_arguments.done":
                         func_name = openai_data.get("name")

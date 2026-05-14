@@ -264,9 +264,9 @@ async def twilio_stream(websocket: WebSocket):
                     # Auto-detect when the caller finishes speaking and trigger a response
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.5,
+                        "threshold": 0.6,
                         "prefix_padding_ms": 400,
-                        "silence_duration_ms": 300,
+                        "silence_duration_ms": 500,
                         "create_response": True,
                     },
                     "tools": [
@@ -440,7 +440,8 @@ async def twilio_stream(websocket: WebSocket):
         current_response_id = None   # Track which response is actively generating
         last_assistant_item_id = None  # Track current assistant item for truncation
         response_audio_sent_ms = 0   # Cumulative ms of audio sent to Twilio
-        is_interrupted = False       # Flag to immediately drop audio on interruption
+        # asyncio.Event for atomic cross-coroutine interrupt signaling
+        interrupt_event = asyncio.Event()
         try:
             async for openai_message in openai_ws:
                 openai_data = json.loads(openai_message)
@@ -450,14 +451,14 @@ async def twilio_stream(websocket: WebSocket):
                 if event_type == "response.created":
                     resp_obj = openai_data.get("response", {})
                     current_response_id = resp_obj.get("id")
-                    is_interrupted = False  # Allow audio for this new response
+                    interrupt_event.clear()  # Allow audio for this new response
                     response_audio_sent_ms = 0  # Reset audio counter
                     logger.info(f"🟢 [OpenAI] New response started: {current_response_id}")
 
                 # Process assistant's generated audio response
                 elif event_type == "response.audio.delta":
                     # DROP all audio chunks if caller interrupted
-                    if is_interrupted:
+                    if interrupt_event.is_set():
                         continue
 
                     # Track item_id for conversation truncation on interruption
@@ -492,15 +493,22 @@ async def twilio_stream(websocket: WebSocket):
                 # Handle user interruption: Stop AI and clear Twilio buffer
                 elif event_type == "input_audio_buffer.speech_started":
                     logger.info("🛑 [OpenAI] User interrupted! Stopping AI immediately...")
-                    is_interrupted = True
+                    # Set event atomically — any concurrent audio.delta checks see this instantly
+                    interrupt_event.set()
 
-                    # 1) Clear Twilio's playback buffer FIRST — stop caller hearing AI
+                    # 1) Fire-and-forget: clear Twilio buffer without blocking the event loop
+                    async def _clear_twilio_buffer(sid):
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "event": "clear",
+                                "streamSid": sid
+                            }))
+                            logger.info("🧹 [Twilio] Cleared audio playback buffer.")
+                        except Exception as e:
+                            logger.error(f"🔴 [Twilio] Failed to clear buffer: {e}")
+
                     if stream_sid:
-                        await websocket.send_text(json.dumps({
-                            "event": "clear",
-                            "streamSid": stream_sid
-                        }))
-                        logger.info("🧹 [Twilio] Cleared audio playback buffer.")
+                        asyncio.create_task(_clear_twilio_buffer(stream_sid))
 
                     # 2) Cancel the current OpenAI response generation
                     try:
@@ -523,10 +531,11 @@ async def twilio_stream(websocket: WebSocket):
                         except Exception as trunc_err:
                             logger.error(f"🔴 [OpenAI] Failed to truncate: {trunc_err}")
 
-                # Log when a response finishes
+                # Response finished or cancelled — clear interrupt so next response plays normally
                 elif event_type in ("response.done", "response.cancelled"):
                     resp_obj = openai_data.get("response", {})
                     done_id = resp_obj.get("id") or current_response_id
+                    interrupt_event.clear()  # Ready for next response
                     logger.info(f"✅ [OpenAI] Response {done_id} finished ({event_type}).")
                 
                 # Additional debug logging for other important OpenAI events
