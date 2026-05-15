@@ -286,6 +286,7 @@ async function startCall() {
     // Audio playback queue
     let audioQueue = [];
     let isPlaying = false;
+    let currentAudioSource = null;
     
     async function playQueue() {
       if (isPlaying || audioQueue.length === 0) return;
@@ -306,8 +307,13 @@ async function startCall() {
             const src = audioContext.createBufferSource();
             src.buffer = buf;
             src.connect(audioContext.destination);
+            currentAudioSource = src;
             src.start();
-            await new Promise(r => src.onended = r);
+            await new Promise(r => {
+                src.onended = r;
+                src.onstop = r; // Custom property to resolve on interrupt
+            });
+            currentAudioSource = null;
           }
         } catch(e) {}
       }
@@ -320,6 +326,14 @@ async function startCall() {
       if (msg.type === 'audio') {
         audioQueue.push(msg.data);
         playQueue();
+      } else if (msg.type === 'interrupt') {
+        audioQueue = []; // Clear pending chunks
+        if (currentAudioSource) {
+            try {
+                currentAudioSource.stop();
+                if (currentAudioSource.onstop) currentAudioSource.onstop();
+            } catch(e) {}
+        }
       } else if (msg.type === 'debug') {
         const t = msg.event?.includes('error') ? 'error' : 
                   msg.event?.includes('success') || msg.event?.includes('connected') ? 'success' :

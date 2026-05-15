@@ -18,7 +18,7 @@ async def generate_ai_response(user_message: str, system_context: Optional[str] 
     """
     from services.prompts import system_prompt
     if system_context is None:
-        system_context = system_prompt()
+        system_context, _ = system_prompt()
 
     if OPENAI_API_KEY:
         payload = {

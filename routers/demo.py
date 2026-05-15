@@ -8,6 +8,7 @@ frontend so every step of the flow is visible.
 import os
 import json
 import base64
+import random
 import asyncio
 import time
 import websockets
@@ -16,7 +17,7 @@ from typing import List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from services.prompts import system_prompt
-
+from routers.twilio import ADS
 router = APIRouter(
     prefix="/api/demo",
     tags=["Demo & Debug"]
@@ -80,6 +81,11 @@ async def demo_voice_stream(websocket: WebSocket):
     user_transcripts = []
     ai_transcripts = []
 
+    # Silence watchdog state
+    last_ai_response_done_at: list = [None]   # use list so inner funcs can mutate
+    caller_spoke_after_ai: list = [False]       # reset when AI responds, set when caller speaks
+    watchdog_active: list = [False]             # becomes True after first greeting is done
+
     async def _send(msg: dict):
         """Helper to safely send JSON to browser."""
         try:
@@ -108,11 +114,23 @@ async def demo_voice_stream(websocket: WebSocket):
                 openai_ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
                 await _debug("openai_connected", "🟢 OpenAI Realtime API connected!")
 
+                instructions, selected_greeting = system_prompt()
+                
                 session_update = {
                     "type": "session.update",
                     "session": {
                         "modalities": ["text", "audio"],
-                        "instructions": system_prompt() 
+                        "instructions": instructions + """
+                        
+                        # ADDITIONAL SESSION RULES
+                        - You are BILINGUAL: English and Bangla ONLY.
+                        - If the caller speaks Bangla, respond in Dhaka Bangla.
+                        - If the caller speaks English, respond in English.
+                        - IGNORE any Spanish, Chinese, or Portuguese hallucinations from the transcription.
+                        - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
+                        - NEVER switch to any other language.
+                        - If you are not sure if the caller is speaking to you, stay silent.
+                        """,
                         # + """
 
                         # # CALLER CRM PROFILE (Simulated for Demo)
@@ -124,16 +142,15 @@ async def demo_voice_stream(websocket: WebSocket):
 
                         # Note: Since this is a Demo session, assume the user is this Class A Client. Greet them by name and handle as VIP.
                         # """
-                        ,
-                        "voice": "alloy",
+                        "voice": "shimmer",
                         "input_audio_format": "pcm16",
                         "output_audio_format": "pcm16",
                         "input_audio_transcription": {"model": "whisper-1"},
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": 0.6,
+                            "threshold": 0.85,
                             "prefix_padding_ms": 300,
-                            "silence_duration_ms": 500
+                            "silence_duration_ms": 600
                         },
                         "tools": [
                             {
@@ -172,6 +189,34 @@ async def demo_voice_stream(websocket: WebSocket):
                                     },
                                     "required": ["name", "email", "phone", "booking_slot", "calendar_type", "call_summary"]
                                 }
+                            },
+                            {
+                                "type": "function",
+                                "name": "transfer_call",
+                                "description": "Transfer the caller to a team member like Simon or Tanzina. Call this when the user is a VIP or requests a human.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "target": {"type": "string", "enum": ["simon", "tanzina", "alex"]},
+                                        "reason": {"type": "string"}
+                                    },
+                                    "required": ["target", "reason"]
+                                }
+                            },
+                            {
+                                "type": "function",
+                                "name": "end_call",
+                                "description": "End the demo session. ONLY call this AFTER you have explicitly asked the user for permission to end the call (e.g. 'Can I end the call now?') AND they have said YES. Never use this just because they say goodbye.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "reason": {
+                                            "type": "string",
+                                            "description": "Reason: 'caller_goodbye', 'task_complete', 'no_response', 'caller_request'"
+                                        }
+                                    },
+                                    "required": ["reason"]
+                                }
                             }
                         ],
                         "tool_choice": "auto"
@@ -184,11 +229,13 @@ async def demo_voice_stream(websocket: WebSocket):
                     "type": "response.create",
                     "response": {
                         "modalities": ["text", "audio"],
-                        "instructions": "Greet the caller using the greeting specified in the GREETING section of your system instructions. Speak it naturally and warmly."
+                        "instructions": f"Greet the caller by saying: \"{selected_greeting}\". Speak it naturally and warmly. IMPORTANT: Use ONLY English or Bangla. NEVER use any other language."
                     }
                 }
                 await openai_ws.send(json.dumps(initial_greeting))
                 await _debug("greeting_sent", "🗣️ AI is preparing a greeting...")
+                # Watchdog starts counting after greeting is sent
+                watchdog_active[0] = True
 
             except Exception as e:
                 print(f"🔴 [Demo] OpenAI error: {e}")
@@ -246,6 +293,17 @@ async def demo_voice_stream(websocket: WebSocket):
                 await call_done.wait()
                 return
 
+            # ── Helper: cleanly end the demo session ──
+            async def _end_demo_call():
+                if call_done.is_set():
+                    return
+                call_done.set()
+                try:
+                    await _send({"type": "call_ended", "reason": "goodbye"})
+                    await _debug("call_end", "📞 Call ended by AI goodbye detection.")
+                except Exception:
+                    pass
+
             ai_chunk_count = 0
             # asyncio.Event for atomic cross-coroutine interrupt signaling
             interrupt_event = asyncio.Event()
@@ -285,6 +343,7 @@ async def demo_voice_stream(websocket: WebSocket):
                             ai_transcripts.append(text)
                             await _debug("ai_transcript", f"🤖 AI: {text}")
                             await _send({"type": "transcript", "role": "assistant", "text": text})
+                            
 
                     elif evt == "conversation.item.input_audio_transcription.completed":
                         user_text = openai_data.get("transcript")
@@ -292,6 +351,7 @@ async def demo_voice_stream(websocket: WebSocket):
                             user_transcripts.append(user_text)
                             await _debug("user_transcript", f"👤 User: {user_text}")
                             await _send({"type": "transcript", "role": "user", "text": user_text})
+                            
 
                     elif evt == "input_audio_buffer.speech_started":
                         await _debug("vad_speech_started", "🎤 Speech detected — interrupting AI...")
@@ -326,9 +386,20 @@ async def demo_voice_stream(websocket: WebSocket):
                     elif evt == "input_audio_buffer.speech_stopped":
                         await _debug("vad_speech_stopped", "🔇 Speech ended, processing...")
 
+                    elif evt == "input_audio_buffer.speech_started":
+                        # Caller spoke — reset silence tracking
+                        caller_spoke_after_ai[0] = True
+
                     # Response finished or cancelled — clear interrupt so next response plays normally
                     elif evt in ("response.done", "response.cancelled"):
                         interrupt_event.clear()
+                        # Start silence timer: AI finished speaking, now waiting for caller
+                        # We add the audio duration to the current time so the watchdog only starts counting
+                        # AFTER the caller actually finishes hearing the audio.
+                        audio_duration_sec = response_audio_sent_ms / 1000.0
+                        last_ai_response_done_at[0] = asyncio.get_event_loop().time() + audio_duration_sec
+                        caller_spoke_after_ai[0] = False
+                        await _debug("response_done", f"✅ Response done. Audio duration: {audio_duration_sec:.2f}s")
 
                     elif openai_data.get("type") == "response.function_call_arguments.done":
                         func_name = openai_data.get("name")
@@ -337,6 +408,57 @@ async def demo_voice_stream(websocket: WebSocket):
                         await _debug("tool_call", f"🛠️ AI called {func_name} with args: {args}")
                         result = {}
                         
+                        if func_name == "transfer_call":
+                            target = args.get("target", "tanzina").lower()
+                            await _debug("transfer_call", f"📲 Transfer started to {target}. Simulating hold flow...")
+                            
+                            ad_msg = random.choice(ADS)
+                            
+                            # Intro + Ad
+                            await openai_ws.send(json.dumps({
+                                "type": "response.create",
+                                "response": {
+                                    "modalities": ["text", "audio"],
+                                    "instructions": f"Translate and say this in the SAME LANGUAGE the user is currently speaking (English or Bangla): 'Please hold on for a moment while I connect you to {target}.' Then, switch to ENGLISH and say this advertisement naturally: '{ad_msg}'. Then switch back to the user's language and say: 'I am still trying to connect you, please wait.'"
+                                }
+                            }))
+
+                            async def _simulated_transfer_flow():
+                                await asyncio.sleep(12)
+                                if call_done.is_set(): return
+                                await _debug("transfer_hold", "⏳ Still trying to connect (12s mark)...")
+                                await openai_ws.send(json.dumps({
+                                    "type": "response.create",
+                                    "response": {
+                                        "modalities": ["text", "audio"],
+                                        "instructions": "In the SAME LANGUAGE the user is speaking, say: 'I am sorry, they haven\'t picked up yet. I am still trying to connect, please stay on the line.'"
+                                    }
+                                }))
+                                
+                                await asyncio.sleep(12)
+                                if call_done.is_set(): return
+                                await _debug("transfer_fail", "❌ Transfer failed (target unavailable).")
+                                await openai_ws.send(json.dumps({
+                                    "type": "response.create",
+                                    "response": {
+                                        "modalities": ["text", "audio"],
+                                        "instructions": f"In the SAME LANGUAGE the user is speaking, say: 'I am sorry, {target} is not available right now. I\'ll make sure they get your message. Is there anything else I can help you with today?'"
+                                    }
+                                }))
+                            
+                            asyncio.create_task(_simulated_transfer_flow())
+                            
+                            # Send tool output so OpenAI knows it was accepted
+                            await openai_ws.send(json.dumps({
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": json.dumps({"status": "success", "message": f"Transferring to {target}"})
+                                }
+                            }))
+                            continue
+
                         if func_name == "book_appointment":
                             from services.booking_service import book_appointment
                             try:
@@ -364,6 +486,21 @@ async def demo_voice_stream(websocket: WebSocket):
                                 result = {"status": "error", "message": "Could not fetch available slots."}
                                 await _debug("tool_error", f"🔴 Slot fetch exception: {e}")
                         
+                        if func_name == "end_call":
+                            reason = args.get("reason", "task_complete")
+                            await _debug("end_call_tool", f"👋 end_call tool called: {reason}")
+                            # Send result back but do NOT trigger another response
+                            await openai_ws.send(json.dumps({
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": json.dumps({"status": "success", "message": "Call ended."})
+                                }
+                            }))
+                            await _end_demo_call()
+                            continue  # skip response.create
+
                         # Send output back to OpenAI for ANY tool call
                         await openai_ws.send(json.dumps({
                             "type": "conversation.item.create",
@@ -380,16 +517,55 @@ async def demo_voice_stream(websocket: WebSocket):
                 print(f"🔴 [Demo] OpenAI stream error: {e}")
                 await _debug("openai_stream_error", f"🔴 OpenAI stream error: {str(e)[:100]}")
 
-        # ── Run both tasks concurrently ──
-        await asyncio.gather(receive_from_browser(), send_to_browser())
+        # ── Task 3: Silence watchdog ──
+        async def silence_watchdog():
+            """If the caller is silent for 12s after the AI finishes speaking, send a gentle nudge."""
+            SILENCE_TIMEOUT = 12  # seconds to wait before nudging
+            nudge_messages = [
+                "Are you still with me?",
+                "জি, শুনতে পাচ্ছেন?",
+                "Hello? Are you still there?",
+            ]
+            nudge_index = 0
+            while not call_done.is_set():
+                await asyncio.sleep(1)
+                if not watchdog_active[0] or not openai_ws:
+                    continue
+                t = last_ai_response_done_at[0]
+                if t is None:
+                    continue
+                elapsed = asyncio.get_event_loop().time() - t
+                if elapsed >= SILENCE_TIMEOUT and not caller_spoke_after_ai[0]:
+                    # Inject a gentle nudge via OpenAI
+                    nudge = nudge_messages[nudge_index % len(nudge_messages)]
+                    nudge_index += 1
+                    try:
+                        await openai_ws.send(json.dumps({
+                            "type": "response.create",
+                            "response": {
+                                "modalities": ["text", "audio"],
+                                "instructions": f"The caller has been silent for a while. Ask them: '{nudge}' — say it naturally, then wait."
+                            }
+                        }))
+                        await _debug("silence_nudge", f"⏱️ Silence timeout — sending nudge: {nudge}")
+                    except Exception:
+                        pass
+                    # Reset timer so we don't spam — next nudge in another 15s
+                    last_ai_response_done_at[0] = asyncio.get_event_loop().time()
+
+        # ── Run all tasks concurrently ──
+        await asyncio.gather(receive_from_browser(), send_to_browser(), silence_watchdog(), return_exceptions=True)
 
     except WebSocketDisconnect:
         print("⚠️ [Demo] WebSocket disconnected (outer).")
+        call_done.set()
     except Exception as e:
         print(f"🔴 [Demo] Unhandled error in voice-stream: {e}")
         import traceback
         traceback.print_exc()
+        call_done.set()
     finally:
+        call_done.set()   # ensure all tasks are released in any scenario
         if openai_ws:
             try:
                 await openai_ws.close()

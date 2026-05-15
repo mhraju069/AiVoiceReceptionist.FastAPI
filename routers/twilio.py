@@ -43,6 +43,7 @@ async def create_session():
         raise HTTPException(status_code=500, detail="OpenAI API key is not set")
 
     from services.prompts import system_prompt
+    instructions, _ = system_prompt()
     
     url = "https://api.openai.com/v1/realtime/sessions"
     headers = {
@@ -53,8 +54,8 @@ async def create_session():
     data = {
         "model": "gpt-4o-realtime-preview",
         "modalities": ["audio", "text"],
-        "voice": "alloy",
-        "instructions": system_prompt(),
+        "voice": "shimmer",
+        "instructions": instructions,
     }
     
     async with httpx.AsyncClient() as client:
@@ -117,35 +118,105 @@ async def make_outbound_call(request: Request):
             raise HTTPException(status_code=500, detail=str(e))
 
 
+ADS = [
+    "Stop overpaying. Join our waitlist for a free tax savings review with our CPA. We'll reach out as soon as a spot opens up.",
+    "We don't just find savings; we help you keep them. Our team guides you through the entire process, ensuring you never feel left behind.",
+    "Personalized tax strategies, not generic templates. We build a plan around your needs and execute it with precision.",
+    "Paying over $30k in business taxes or earning $50k+ on a 1099? You're likely overpaying. Contact us for a complimentary CPA review to see how much you could save."
+]
+
+
 @router.post("/forward-call")
 async def forward_call(request: Request):
     """
     TwiML endpoint Twilio calls when redirecting a call to a team member.
-    Reads ?to= from query params and dials that number.
+
+    Flow:
+      attempt=1 → "I'm connecting you..." + Ad → Dial(15s)
+      attempt=2 → "Still connecting, please hold..." → Dial(15s)
+      attempt≥3 → "Sorry, not available right now."
+
+    Ads always play at least once (attempt 1) before any failure message.
     """
     to_number = request.query_params.get("to", "")
+    attempt   = int(request.query_params.get("attempt", "1"))
+    host      = os.getenv("PUBLIC_HOST", "")
+
+    logger.info(f"📲 [Forward] to={to_number} attempt={attempt}")
+
     if not to_number:
-        twiml = """<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, we could not connect your call at this time. Please try again later.</Say></Response>"""
-    else:
+        twiml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Joanna">Sorry, we could not connect your call at this time. Please try again later.</Say>
+</Response>"""
+        return Response(content=twiml, media_type="text/xml")
+
+    # Build the fallback URL that carries to/attempt forward
+    import urllib.parse as _ul
+    fallback_url = f"https://{host}/api/twilio/forward-fallback?to={_ul.quote(to_number)}&attempt={attempt}"
+
+    if attempt == 1:
+        # First attempt: play intro + ad, then dial
+        ad_message = random.choice(ADS)
+        logger.info(f"📣 [Forward] Ad selected: {ad_message[:50]}...")
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Dial callerId="{TWILIO_NUMBER}" timeout="30" action="/api/twilio/forward-fallback">
+    <Say voice="Polly.Joanna">Please hold on for a moment while I connect you.</Say>
+    <Say voice="Polly.Joanna">{ad_message}</Say>
+    <Say voice="Polly.Joanna">I'm still trying to connect you, please wait.</Say>
+    <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url}">
         <Number>{to_number}</Number>
     </Dial>
 </Response>"""
+
+    elif attempt == 2:
+        # Second attempt: brief hold message, then dial again
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Joanna">They haven't picked up yet. I'm still trying — please stay on the line.</Say>
+    <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url}">
+        <Number>{to_number}</Number>
+    </Dial>
+</Response>"""
+
+    else:
+        # All attempts exhausted — person is unavailable
+        twiml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Joanna">I'm sorry, they are not available right now. I'll make sure they get your message and call you back as soon as possible. Thank you for your patience.</Say>
+</Response>"""
+
     return Response(content=twiml, media_type="text/xml")
 
 
 @router.post("/forward-fallback")
 async def forward_fallback(request: Request):
     """
-    TwiML endpoint called when the forwarded call ends or is not answered.
-    Plays a fallback message.
+    Called by Twilio when a Dial attempt ends (no-answer, busy, failed).
+    Increments attempt counter and redirects back to /forward-call.
     """
-    twiml = """<?xml version="1.0" encoding="UTF-8"?>
+    form_data   = await request.form()
+    dial_status = form_data.get("DialCallStatus", "no-answer")
+    to_number   = request.query_params.get("to", "")
+    attempt     = int(request.query_params.get("attempt", "1"))
+    host        = os.getenv("PUBLIC_HOST", "")
+
+    logger.info(f"📵 [Fallback] DialCallStatus={dial_status} to={to_number} attempt={attempt}")
+
+    if dial_status == "completed":
+        # Call was answered and finished normally — just hang up cleanly
+        twiml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response></Response>"""
+    else:
+        # Not answered — try again or give up
+        import urllib.parse as _ul
+        next_attempt  = attempt + 1
+        next_url      = f"https://{host}/api/twilio/forward-call?to={_ul.quote(to_number)}&attempt={next_attempt}"
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>I'm sorry, the team member is not available right now. Please leave your details and we will call you back shortly.</Say>
+    <Redirect method="POST">{next_url}</Redirect>
 </Response>"""
+
     return Response(content=twiml, media_type="text/xml")
 
 
@@ -220,6 +291,12 @@ async def twilio_stream(websocket: WebSocket):
     transcript_accumulator = []
     openai_ws = None
     start_time_dt = datetime.datetime.utcnow()
+    call_done = asyncio.Event()  # signals all tasks to stop cleanly
+
+    # Silence watchdog state
+    last_ai_response_done_at: list = [None]
+    caller_spoke_after_ai: list = [False]
+    watchdog_active: list = [False]
 
     # Connect to OpenAI Realtime API if the API key is present
     if OPENAI_API_KEY:
@@ -233,13 +310,25 @@ async def twilio_stream(websocket: WebSocket):
             logger.info("🟢 [OpenAI] Successfully connected to OpenAI Realtime API.")
 
             from services.prompts import system_prompt
+            instructions, selected_greeting = system_prompt()
 
             # Send session configuration to OpenAI
             session_update = {
                 "type": "session.update",
                 "session": {
                     "modalities": ["text", "audio"],
-                    "instructions": system_prompt() + f"""
+                    "instructions": instructions + f"""
+
+                    # ADDITIONAL SESSION RULES
+                    - You are BILINGUAL: English and Bangla ONLY.
+                    - If the caller speaks Bangla, respond in Dhaka Bangla.
+                    - If the caller speaks English, respond in English.
+                    - IGNORE any Spanish, Chinese, or Portuguese hallucinations from the transcription.
+                    - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
+                    - NEVER switch to any other language.
+                    - If you are not sure if the caller is speaking to you, stay silent.
+                    - CALL END RULE: When the conversation is complete, or the caller says goodbye/bye/thank you, say a warm goodbye THEN immediately call the `end_call` tool. NEVER keep talking after saying goodbye.
+                    - TRANSFER RULE: When transferring a call, ALWAYS say something like "Please hold on a moment while I connect you to Simon" BEFORE calling the `transfer_call` tool.
 
                     # CALLER CRM PROFILE (Pre-loaded from GHL)
                     Caller Name: {contact_name}
@@ -255,7 +344,7 @@ async def twilio_stream(websocket: WebSocket):
                     - If Prospect, follow the standard intro and qualification workflow.
                     """,
                     
-                    "voice": "alloy",
+                    "voice": "shimmer",
                     "input_audio_format": "g711_ulaw",
                     "output_audio_format": "g711_ulaw",
                     "input_audio_transcription": {
@@ -264,9 +353,9 @@ async def twilio_stream(websocket: WebSocket):
                     # Auto-detect when the caller finishes speaking and trigger a response
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.6,
+                        "threshold": 0.85,
                         "prefix_padding_ms": 400,
-                        "silence_duration_ms": 500,
+                        "silence_duration_ms": 600,
                         "create_response": True,
                     },
                     "tools": [
@@ -341,6 +430,21 @@ async def twilio_stream(websocket: WebSocket):
                                 },
                                 "required": ["caller_name", "caller_phone", "message", "call_reason"]
                             }
+                        },
+                        {
+                            "type": "function",
+                            "name": "end_call",
+                            "description": "Hang up and end the call. ONLY call this AFTER you have explicitly asked the user for permission to end the call (e.g. 'Can I end the call now?') AND they have said YES. Never use this just because they say goodbye.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "reason": {
+                                        "type": "string",
+                                        "description": "Brief reason for ending: 'caller_goodbye', 'task_complete', 'no_response', 'caller_request'"
+                                    }
+                                },
+                                "required": ["reason"]
+                            }
                         }
                     ],
                     "tool_choice": "auto"
@@ -355,12 +459,13 @@ async def twilio_stream(websocket: WebSocket):
                 greeting_instruction = (
                     f"The caller is {contact_name}, a {client_type} of Pay Minimum Tax. "
                     f"Greet them with an Islamic greeting by name in Dhaka Bangla. "
-                    f"Say: আসসালামু আলাইকুম {contact_name} ভাই, আমি রেবা, আপনার জন্য আজ কি করতে পারি?"
+                    f"Say: আসসালামু আলাইকুম {contact_name} ভাই, আমি রেবা, আপনার জন্য আজ কি করতে পারি? "
+                    "Speak ONLY in English or Bangla."
                 )
             else:
                 greeting_instruction = (
-                    "The caller is a new prospect. "
-                    "Greet them using the greeting specified in the GREETING section of your system instructions. Speak naturally and warmly."
+                    f"The caller is a new prospect. Greet them by saying: \"{selected_greeting}\". "
+                    "Speak naturally and warmly. IMPORTANT: Use ONLY English or Bangla. NEVER use any other language."
                 )
             initial_greeting = {
                 "type": "response.create",
@@ -371,6 +476,7 @@ async def twilio_stream(websocket: WebSocket):
             }
             await openai_ws.send(json.dumps(initial_greeting))
             logger.info("🗣️ [OpenAI] Sent initial Bangla greeting trigger.")
+            watchdog_active[0] = True
 
         except Exception as e:
             logger.info(f"🔴 [OpenAI] Error connecting to OpenAI Realtime API: {e}. Falling back to echo/mock.")
@@ -424,26 +530,49 @@ async def twilio_stream(websocket: WebSocket):
 
                 elif data.get("event") == "stop":
                     logger.info(f"🛑 [Twilio -> Server] Media stream stopped. Total chunks: {media_count}")
+                    call_done.set()   # Signal all tasks to stop
                     break
 
         except WebSocketDisconnect:
             logger.info("⚠️ [Twilio WebSocket] Disconnected from Twilio.")
+            call_done.set()
         except Exception as e:
             logger.info(f"🔴 [Twilio WebSocket] Error reading from Twilio: {e}")
+            call_done.set()
 
     async def send_to_twilio():
         nonlocal stream_sid
         if not openai_ws:
+            await call_done.wait()
             return
 
+        # ── Helper: hang up via Twilio REST + set call_done ──
+        async def _hangup_call():
+            if call_done.is_set():
+                return   # already hanging up
+            call_done.set()
+            if call_sid:
+                try:
+                    end_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Calls/{call_sid}.json"
+                    auth = (TWILIO_SID, TWILIO_AUTH_TOKEN)
+                    async with httpx.AsyncClient(timeout=5) as client:
+                        resp = await client.post(end_url, data={"Status": "completed"}, auth=auth)
+                    if resp.status_code == 200:
+                        logger.info(f"✅ [Hangup] Twilio call {call_sid} terminated.")
+                    else:
+                        logger.error(f"🔴 [Hangup] Twilio error: {resp.status_code} {resp.text[:80]}")
+                except Exception as e:
+                    logger.error(f"🔴 [Hangup] Exception: {e}")
+
         openai_media_count = 0
-        current_response_id = None   # Track which response is actively generating
-        last_assistant_item_id = None  # Track current assistant item for truncation
-        response_audio_sent_ms = 0   # Cumulative ms of audio sent to Twilio
-        # asyncio.Event for atomic cross-coroutine interrupt signaling
+        current_response_id = None
+        last_assistant_item_id = None
+        response_audio_sent_ms = 0
         interrupt_event = asyncio.Event()
         try:
             async for openai_message in openai_ws:
+                if call_done.is_set():
+                    break
                 openai_data = json.loads(openai_message)
                 event_type = openai_data.get("type", "")
 
@@ -493,6 +622,8 @@ async def twilio_stream(websocket: WebSocket):
                 # Handle user interruption: Stop AI and clear Twilio buffer
                 elif event_type == "input_audio_buffer.speech_started":
                     logger.info("🛑 [OpenAI] User interrupted! Stopping AI immediately...")
+                    # Caller spoke — reset silence tracking
+                    caller_spoke_after_ai[0] = True
                     # Set event atomically — any concurrent audio.delta checks see this instantly
                     interrupt_event.set()
 
@@ -536,7 +667,14 @@ async def twilio_stream(websocket: WebSocket):
                     resp_obj = openai_data.get("response", {})
                     done_id = resp_obj.get("id") or current_response_id
                     interrupt_event.clear()  # Ready for next response
-                    logger.info(f"✅ [OpenAI] Response {done_id} finished ({event_type}).")
+                    
+                    # Start silence timer: AI finished generating, but audio takes time to play.
+                    # We add the audio duration to the current time so the watchdog only starts counting
+                    # AFTER the caller actually finishes hearing the audio.
+                    audio_duration_sec = response_audio_sent_ms / 1000.0
+                    last_ai_response_done_at[0] = asyncio.get_event_loop().time() + audio_duration_sec
+                    caller_spoke_after_ai[0] = False
+                    logger.info(f"✅ [OpenAI] Response {done_id} finished ({event_type}). Audio Duration: {audio_duration_sec:.2f}s")
                 
                 # Additional debug logging for other important OpenAI events
                 elif event_type in ("response.text.done", "response.audio_transcript.done"):
@@ -544,13 +682,15 @@ async def twilio_stream(websocket: WebSocket):
                     if text:
                         logger.info(f"\n🤖 [AI Reply]: {text}")
                         transcript_accumulator.append(f"AI: {text}")
+                        
                 
-                # Catch the user's speech transcript
+                # Catch the user's speech transcript + detect caller goodbye
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     user_text = openai_data.get("transcript")
                     if user_text:
                         logger.info(f"\n👤 [Caller]: {user_text}")
                         transcript_accumulator.append(f"Caller: {user_text}")
+                        
 
                 # Handle tool calls
                 elif event_type == "response.function_call_arguments.done":
@@ -618,6 +758,23 @@ async def twilio_stream(websocket: WebSocket):
                                 result = {"status": "error", "message": "Transfer failed due to a technical error."}
                                 logger.error(f"🔴 [Transfer] Exception during transfer: {e}")
 
+                    elif func_name == "end_call":
+                        reason = args.get("reason", "task_complete")
+                        logger.info(f"👋 [EndCall] AI requested call end. Reason: {reason}")
+                        await _hangup_call()
+                        result = {"status": "success", "message": "Call ended."}
+                        # Send tool result back but DON'T trigger another response
+                        await openai_ws.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(result)
+                            }
+                        }))
+                        # do NOT call response.create here
+                        continue   # skip the response.create at the bottom
+
                     elif func_name == "record_message":
                         caller_name_arg  = args.get("caller_name", contact_name)
                         caller_phone_arg = args.get("caller_phone", caller_number)
@@ -655,17 +812,57 @@ async def twilio_stream(websocket: WebSocket):
         except Exception as e:
             logger.info(f"🔴 [OpenAI -> Twilio] Error streaming response from OpenAI to Twilio: {e}")
 
+    # Silence watchdog for Twilio calls
+    async def silence_watchdog():
+        """After 12s of caller silence post-AI response, inject a gentle nudge."""
+        SILENCE_TIMEOUT = 12
+        nudge_messages = [
+            "Are you still with me?",
+            "জি, শুনতে পাচ্ছেন?",
+            "Hello? Are you still there?",
+        ]
+        nudge_index = 0
+        while not call_done.is_set():
+            await asyncio.sleep(1)
+            if not watchdog_active[0] or not openai_ws:
+                continue
+            t = last_ai_response_done_at[0]
+            if t is None:
+                continue
+            elapsed = asyncio.get_event_loop().time() - t
+            if elapsed >= SILENCE_TIMEOUT and not caller_spoke_after_ai[0]:
+                nudge = nudge_messages[nudge_index % len(nudge_messages)]
+                nudge_index += 1
+                try:
+                    await openai_ws.send(json.dumps({
+                        "type": "response.create",
+                        "response": {
+                            "modalities": ["text", "audio"],
+                            "instructions": f"The caller has been silent for a while. Ask: '{nudge}' — say it naturally and wait."
+                        }
+                    }))
+                    logger.info(f"⏱️ [Watchdog] Silence nudge sent: {nudge}")
+                except Exception:
+                    pass
+                last_ai_response_done_at[0] = asyncio.get_event_loop().time()
+
     # Orchestrate bidirectional async tasks
     try:
         await asyncio.gather(
             receive_from_twilio(),
-            send_to_twilio()
+            send_to_twilio(),
+            silence_watchdog(),
+            return_exceptions=True
         )
     finally:
+        call_done.set()   # make sure all tasks are unblocked in edge cases
         if openai_ws:
-            await openai_ws.close()
-        
-        # Save Call Log to Database
+            try:
+                await openai_ws.close()
+                logger.info("🔒 [OpenAI] WebSocket closed cleanly.")
+            except Exception:
+                pass
+        logger.info("🔒 [Twilio] Bidirectional voice session closed.")
         if transcript_accumulator:
             full_transcript = "\n".join(transcript_accumulator)
             try:

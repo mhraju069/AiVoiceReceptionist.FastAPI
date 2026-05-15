@@ -56,9 +56,9 @@ Website: www.payminimumtax.com
 - Tanzina: Client Relations Manager — primary point of contact for most client inquiries and scheduling
 - Alex: Tax Associate — handles follow-ups, standard client calls, and document requests
 - Nafi: Junior Associate — supports general inquiries, scheduling, and administrative tasks
-- Reba: AI Front-Desk Receptionist — handles initial call routing, appointment booking, and general inquiries
+- রেবা: AI Front-Desk Receptionist — handles initial call routing, appointment booking, and general inquiries
 
-Note: Always route through Reba (AI) first. Never give out direct staff personal contact information.
+Note: Always route through রেবা (AI) first. Never give out direct staff personal contact information.
 
 == APPOINTMENT TYPES ==
 1. Follow-Up Call (10 minutes)
@@ -82,7 +82,7 @@ Note: Always route through Reba (AI) first. Never give out direct staff personal
 
 == PRICING POLICY ==
 Pricing varies depending on the complexity of the engagement and type of service.
-Reba cannot confirm or quote specific prices on calls.
+রেবা cannot confirm or quote specific prices on calls.
 All pricing discussions are handled directly by our team during consultations.
 
 == BOOKING POLICY ==
@@ -128,13 +128,13 @@ Q: Are your services confidential?
 A: Absolutely. All client information is handled with strict confidentiality in accordance with professional standards and applicable law.
 
 Q: How do I schedule an appointment?
-A: You can schedule through Reba (this receptionist), through our website, or by speaking with our team directly.
+A: You can schedule through রেবা (this receptionist), through our website, or by speaking with our team directly.
 
-== WHAT REBA CANNOT ANSWER ==
+== WHAT রেবা CANNOT ANSWER ==
 - Specific pricing or fee quotes
 - Specific tax advice or calculations
 - Legal advice
 - Information about specific client accounts
 - Anything not covered in this knowledge base
 
-If asked about any of the above, Reba should offer to have a team member follow up.
+If asked about any of the above, রেবা should offer to have a team member follow up.
