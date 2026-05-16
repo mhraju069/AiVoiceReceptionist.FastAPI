@@ -23,6 +23,7 @@ from services.ghl import add_contact, create_appointment, get_all_appointments
 from services.email_service import send_booking_confirmation, send_stripe_payment_link
 from services.stripe_service import create_stripe_payment_link
 from schemas import ContactCreate, AppointmentCreate
+from services.booking_service import OFFICE_TIMEZONE, validate_office_slot
 
 router = APIRouter(
     prefix="/api/booking",
@@ -39,7 +40,7 @@ class BookingRequest(BaseModel):
     name: Optional[str] = "Caller"           # Default name if unknown
     calendar_id: str                          # GHL Calendar ID to book into
     booking_slot: str                         # ISO datetime: "2026-05-10T10:00:00Z"
-    timezone: Optional[str] = "Asia/Dhaka"
+    timezone: Optional[str] = OFFICE_TIMEZONE
     call_summary: str                         # AI-generated summary of the call
     title: Optional[str] = "Appointment After AI Call"
 
@@ -48,7 +49,7 @@ class BookingRequest(BaseModel):
 # Get Available Slots endpoint
 # ─────────────────────────────────────────────
 @router.get("/slots")
-async def get_slots(calendar_id: str, timezone: str = "Asia/Dhaka"):
+async def get_slots(calendar_id: str, timezone: str = OFFICE_TIMEZONE):
     import time
     import httpx
     from config import GHL_BASE_URL
@@ -120,6 +121,9 @@ async def process_booking(req: BookingRequest):
     logger.info(f"\n📋 [Booking] Processing booking for phone={req.phone}, email={req.email}")
     
     final_booking_slot = req.booking_slot
+    is_valid_slot, slot_error = validate_office_slot(final_booking_slot)
+    if not is_valid_slot:
+        raise HTTPException(status_code=400, detail=slot_error)
 
     # ── Step 1: Search contact in GHL ──────────────────────────────────────
     existing_contact = await search_contact_by_phone_or_email(

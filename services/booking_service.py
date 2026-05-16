@@ -8,6 +8,8 @@ from config import (
     CALENDAR_VIRTUAL_CONSULT_15, CALENDAR_VIRTUAL_CPA_45, 
     CALENDAR_OFFICE_CPA_45, CALENDAR_BEAUTY_SALON_45, CALENDAR_TEST
 )
+from datetime import datetime, time as datetime_time
+from zoneinfo import ZoneInfo
 import time
 import httpx
 from services.ghl import get_ghl_headers, add_contact, update_contact, create_appointment
@@ -64,16 +66,20 @@ CALENDARS = {
 
 DEFAULT_CALENDAR_ID = "XGl4AFDSVEujEeFvAa1W" # Follow up B as default
 PRIORITY_GROUPS = ["Group A", "Group B", "Group C", "Group D", "A", "B", "C", "D"]
+OFFICE_TIMEZONE = "America/New_York"
+OFFICE_TZ = ZoneInfo(OFFICE_TIMEZONE)
+OFFICE_OPEN = datetime_time(10, 0)
+OFFICE_CLOSE = datetime_time(16, 0)
 
 
-def _timezone_from_offset(slot: str, fallback: str = "Asia/Dhaka") -> str:
+def _timezone_from_offset(slot: str, fallback: str = OFFICE_TIMEZONE) -> str:
     """Infer the GHL timezone string from the ISO offset in the slot."""
     if slot.endswith("Z"):
         return "UTC"
     if "-04:00" in slot:
         return "America/New_York"
     if "-05:00" in slot:
-        return "America/Chicago"
+        return "America/New_York" if fallback == OFFICE_TIMEZONE else "America/Chicago"
     if "-06:00" in slot:
         return "America/Chicago"
     if "-07:00" in slot:
@@ -87,7 +93,31 @@ def _timezone_from_offset(slot: str, fallback: str = "Asia/Dhaka") -> str:
     return fallback
 
 
-async def get_slots(calendar_type: str = "follow_up_b", timezone: str = "Asia/Dhaka") -> dict:
+def _slot_as_office_time(slot: str) -> datetime:
+    """Parse a selected ISO slot and return it in PMT's office timezone."""
+    dt = datetime.fromisoformat(slot.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=OFFICE_TZ)
+    return dt.astimezone(OFFICE_TZ)
+
+
+def validate_office_slot(slot: str) -> tuple[bool, str]:
+    try:
+        slot_et = _slot_as_office_time(slot)
+    except ValueError:
+        return False, "The selected appointment time is not a valid date/time."
+
+    now_et = datetime.now(OFFICE_TZ)
+    if slot_et <= now_et:
+        return False, "The selected appointment time has already passed. Please choose a future Eastern Time slot."
+    if slot_et.weekday() >= 5:
+        return False, "The selected appointment time is outside office days. Please choose Monday through Friday."
+    if not (OFFICE_OPEN <= slot_et.time() < OFFICE_CLOSE):
+        return False, "The selected appointment time is outside office hours. Please choose 10:00 AM to 4:00 PM Eastern Time."
+    return True, ""
+
+
+async def get_slots(calendar_type: str = "follow_up_b", timezone: str = OFFICE_TIMEZONE) -> dict:
     """Fetch available slots for the next 7 days from GHL for a specific calendar."""
     cal_config = CALENDARS.get(calendar_type, CALENDARS["follow_up_b"])
     calendar_id = cal_config["id"]
@@ -117,7 +147,7 @@ async def book_appointment(
     booking_slot: str,
     call_summary: str,
     calendar_type: str = "follow_up_b", # Default type
-    timezone: str = "Asia/Dhaka",
+    timezone: str = OFFICE_TIMEZONE,
 ) -> dict:
     """Full booking flow: find/create contact, check priority, book slot or request payment."""
     print(f"\n📋 [BookingService] phone={phone}, email={email}, slot={booking_slot}, type={calendar_type}")
@@ -126,6 +156,10 @@ async def book_appointment(
     cal_config = CALENDARS.get(calendar_type, CALENDARS["follow_up_b"])
     calendar_id = cal_config["id"]
     
+    is_valid_slot, slot_error = validate_office_slot(booking_slot)
+    if not is_valid_slot:
+        return {"status": "invalid_slot", "message": slot_error}
+
     ghl_timezone = _timezone_from_offset(booking_slot, fallback=timezone)
 
     # Step 1: Search existing contact
@@ -266,7 +300,6 @@ async def book_appointment(
 
     # Step 3: Send confirmation email
     try:
-        from datetime import datetime
         dt = datetime.fromisoformat(booking_slot.replace("Z", "+00:00"))
         booking_date = dt.strftime("%d %B %Y")
         booking_time = dt.strftime("%I:%M %p")

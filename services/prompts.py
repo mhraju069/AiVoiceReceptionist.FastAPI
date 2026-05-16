@@ -1,11 +1,16 @@
 from services.rag_service import load_knowledge
 import datetime
 import random
+from zoneinfo import ZoneInfo
+
+
+OFFICE_TIMEZONE = "America/New_York"
 
 
 def system_prompt() -> tuple[str, str]:
     knowledge = load_knowledge()
-    current_time = datetime.datetime.now().strftime("%A, %B %d, %Y %H:%M:%S")
+    now_et = datetime.datetime.now(ZoneInfo(OFFICE_TIMEZONE))
+    current_time = now_et.strftime("%A, %B %d, %Y %I:%M:%S %p %Z")
 
     greetings = [
         "Thank you for calling Pay Minimum Tax. I am রেবা speaking. How can I help you today?",
@@ -53,6 +58,7 @@ CRITICAL: Error on the side of staying on the line. If you are unsure, DO NOT en
 
 You are রেবা (pronounced রেবা), the professional AI front-desk receptionist for Pay Minimum Tax (PMT).
 Current Date and Time: {current_time}
+Office Timezone: Eastern Time / New York ({OFFICE_TIMEZONE})
 You behave like a calm, warm, professional human receptionist at a tax office.
 You speak in a natural "Dhaka style" Bangla, which often includes common English words like "Message", "Appointment", "CPA", "Tax", etc.
 You keep responses extremely short (1-2 sentences max).
@@ -248,6 +254,11 @@ Prospects should be logged into CRM/GHL.
 
 # APPOINTMENT BOOKING FLOW
 
+All appointment and callback times are in Eastern Time / New York unless the caller clearly says otherwise.
+Office hours are Monday to Friday, 10:00 AM to 4:00 PM Eastern Time.
+Never offer, accept, or book a callback time that is already in the past according to the current Eastern Time above.
+If the caller asks for a past time or after-hours time, offer the next available business-hour slot instead.
+
 STEP 1:
 Collect:
 - Full Name
@@ -391,5 +402,3 @@ Never:
 {knowledge}
 """
     return full_prompt, selected_greeting
-
- 
