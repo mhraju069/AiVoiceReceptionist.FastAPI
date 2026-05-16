@@ -1,7 +1,7 @@
 import logging
 logger = logging.getLogger(__name__)
 
-import os,json,base64,asyncio,httpx,datetime,html,random
+import os,json,base64,asyncio,httpx,datetime,html,random,re
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect, HTTPException
 import websockets
 from database import SessionLocal
@@ -33,6 +33,49 @@ OPENAI_WS_URL = os.getenv(
     "OPENAI_WS_URL", 
     "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 )
+
+IGNORED_TRANSCRIPT_WORDS = {
+    "hello",
+    "hi",
+    "hey",
+    "hmm",
+    "um",
+    "uh",
+    "hola",
+}
+
+MEANINGFUL_SHORT_WORDS = {
+    "yes",
+    "yeah",
+    "yep",
+    "no",
+    "ok",
+    "okay",
+    "bye",
+}
+
+
+def _is_meaningful_transcript(text: str) -> bool:
+    cleaned = re.sub(r"[^A-Za-z0-9\u0980-\u09FF\s]", " ", text or "").strip()
+    if not cleaned:
+        return False
+
+    words = [word.lower() for word in cleaned.split()]
+    if not words:
+        return False
+
+    has_bangla = any("\u0980" <= char <= "\u09FF" for char in cleaned)
+    has_alnum = any(char.isalnum() for char in cleaned)
+    if not has_bangla and not has_alnum:
+        return False
+
+    if len(words) == 1 and words[0] in MEANINGFUL_SHORT_WORDS:
+        return True
+    if len(words) == 1 and words[0] in IGNORED_TRANSCRIPT_WORDS:
+        return False
+    if len(cleaned) < 4 and not has_bangla:
+        return False
+    return True
 
 
 @router.post("/session")
@@ -378,9 +421,9 @@ async def twilio_stream(websocket: WebSocket):
                     "turn_detection": {
                         "type": "server_vad",
                         "threshold": 0.85,
-                        "prefix_padding_ms": 400,
+                        "prefix_padding_ms": 300,
                         "silence_duration_ms": 600,
-                        "create_response": True,
+                        "create_response": False,
                     },
                     "tools": [
                         {
@@ -686,6 +729,9 @@ async def twilio_stream(websocket: WebSocket):
                         except Exception as trunc_err:
                             logger.error(f"🔴 [OpenAI] Failed to truncate: {trunc_err}")
 
+                elif event_type == "input_audio_buffer.speech_stopped":
+                    logger.info("🔇 [OpenAI] Speech ended, waiting for transcript check...")
+
                 # Response finished or cancelled — clear interrupt so next response plays normally
                 elif event_type in ("response.done", "response.cancelled"):
                     resp_obj = openai_data.get("response", {})
@@ -714,6 +760,11 @@ async def twilio_stream(websocket: WebSocket):
                     if user_text:
                         logger.info(f"\n👤 [Caller]: {user_text}")
                         transcript_accumulator.append(f"Caller: {user_text}")
+                        if _is_meaningful_transcript(user_text):
+                            await openai_ws.send(json.dumps({"type": "response.create"}))
+                            logger.info("✅ [OpenAI] Meaningful caller transcript; response.create sent.")
+                        else:
+                            logger.info("🤫 [OpenAI] Ignored likely noise/short hallucinated transcript.")
                         
 
                 # Handle tool calls
