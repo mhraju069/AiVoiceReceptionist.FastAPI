@@ -1,12 +1,13 @@
 import logging
 logger = logging.getLogger(__name__)
 
-import os,json,base64,asyncio,httpx,datetime
+import os,json,base64,asyncio,httpx,datetime,html,random
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect, HTTPException
 import websockets
 from database import SessionLocal
 from models.activity_models import CallLog
 from config import FORWARD_SIMON, FORWARD_TANZINA, FORWARD_ALEX, FORWARD_NAFI
+from services.known_clients import find_known_client_by_phone, profile_from_known_client
 
 router = APIRouter(
     prefix="/api/twilio",
@@ -154,6 +155,7 @@ async def forward_call(request: Request):
     # Build the fallback URL that carries to/attempt forward
     import urllib.parse as _ul
     fallback_url = f"https://{host}/api/twilio/forward-fallback?to={_ul.quote(to_number)}&attempt={attempt}"
+    fallback_url_xml = html.escape(fallback_url, quote=True)
 
     if attempt == 1:
         # First attempt: play intro + ad, then dial
@@ -164,7 +166,7 @@ async def forward_call(request: Request):
     <Say voice="Polly.Joanna">Please hold on for a moment while I connect you.</Say>
     <Say voice="Polly.Joanna">{ad_message}</Say>
     <Say voice="Polly.Joanna">I'm still trying to connect you, please wait.</Say>
-    <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url}">
+    <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url_xml}">
         <Number>{to_number}</Number>
     </Dial>
 </Response>"""
@@ -174,7 +176,7 @@ async def forward_call(request: Request):
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Joanna">They haven't picked up yet. I'm still trying — please stay on the line.</Say>
-    <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url}">
+    <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url_xml}">
         <Number>{to_number}</Number>
     </Dial>
 </Response>"""
@@ -212,9 +214,10 @@ async def forward_fallback(request: Request):
         import urllib.parse as _ul
         next_attempt  = attempt + 1
         next_url      = f"https://{host}/api/twilio/forward-call?to={_ul.quote(to_number)}&attempt={next_attempt}"
+        next_url_xml = html.escape(next_url, quote=False)
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Redirect method="POST">{next_url}</Redirect>
+    <Redirect method="POST">{next_url_xml}</Redirect>
 </Response>"""
 
     return Response(content=twiml, media_type="text/xml")
@@ -235,15 +238,23 @@ async def incoming_call(request: Request):
     group = ""
     contact_id = ""
     invoice_due = "false"
+    email = ""
+    business_name = ""
+    client_notes = ""
     try:
-        profile = await get_contact_profile_by_phone(caller_number)
+        known_client = find_known_client_by_phone(caller_number)
+        profile = profile_from_known_client(known_client) if known_client else await get_contact_profile_by_phone(caller_number)
         if profile.get("found"):
             contact_name = profile.get("name", "Client")
             client_type = profile.get("client_type", "Prospect")
             group = profile.get("group") or ""
             contact_id = profile.get("contact_id") or ""
             invoice_due = "true" if profile.get("invoice_due") else "false"
-            logger.info(f"📌 [GHL] {caller_number} -> {contact_name} | {client_type} | Group:{group} | Invoice:{invoice_due}")
+            email = profile.get("email") or ""
+            business_name = profile.get("business_name") or ""
+            client_notes = profile.get("notes") or ""
+            source = profile.get("source") or "ghl"
+            logger.info(f"📌 [Client:{source}] {caller_number} -> {contact_name} | {client_type} | Group:{group} | Invoice:{invoice_due}")
     except Exception as e:
         logger.error(f"Error fetching contact profile: {e}")
 
@@ -257,14 +268,18 @@ async def incoming_call(request: Request):
         "group": group,
         "contact_id": contact_id,
         "invoice_due": invoice_due,
+        "email": email,
+        "business_name": business_name,
+        "client_notes": client_notes,
     })
     stream_url = f"{ws_protocol}://{host}/api/twilio/stream?{params}"
+    stream_url_xml = html.escape(stream_url, quote=True)
     logger.info(f"📞 [Incoming] {caller_number} ({contact_name}) -> {stream_url}")
 
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{stream_url}" />
+        <Stream url="{stream_url_xml}" />
     </Connect>
 </Response>"""
 
@@ -284,6 +299,9 @@ async def twilio_stream(websocket: WebSocket):
     group         = websocket.query_params.get("group", "")
     contact_id    = websocket.query_params.get("contact_id", "")
     invoice_due   = websocket.query_params.get("invoice_due", "false") == "true"
+    email         = websocket.query_params.get("email", "")
+    business_name = websocket.query_params.get("business_name", "")
+    client_notes = websocket.query_params.get("client_notes", "")
     logger.info(f"\n🎙️ [WebSocket] {caller_number} | {contact_name} | {client_type} | Group:{group} | Invoice:{invoice_due}")
     # Metadata for call logging
     stream_sid = None
@@ -336,11 +354,17 @@ async def twilio_stream(websocket: WebSocket):
                     Group: {group if group else 'Unknown'}
                     Invoice Due: {'Yes' if invoice_due else 'No'}
                     Phone: {caller_number}
+                    Email: {email if email else 'Unknown'}
+                    Business Name: {business_name if business_name else 'Unknown'}
+                    Client Notes/Greeting Name: {client_notes if client_notes else 'None'}
 
                     Use this information immediately:
-                    - If Client Type is 'Class A/B/C/D Client', treat as VIP and prioritize Simon transfer.
+                    - If Client Type is 'Class A/B/C/D Client' or 'Known VIP Client', treat as VIP and prioritize Simon transfer.
                     - If Invoice Due is Yes, include it in the internal staff handoff note only. Never mention invoices or billing to the caller directly.
                     - If the caller is a known client, address them by name without asking.
+                    - If Client Notes/Greeting Name is present, use that naturally as the preferred greeting name.
+                    - If Phone or Email is listed above, do not ask the caller for that same phone number or email again.
+                    - If Business Name is listed above, use it for context and do not ask the caller to repeat it unless needed.
                     - If Prospect, follow the standard intro and qualification workflow.
                     """,
                     
