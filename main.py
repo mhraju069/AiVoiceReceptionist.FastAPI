@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from database import engine, Base
 from routers import ghl, twilio, auth, activity
 from routers.auth import get_current_user
-from routers import booking, demo, dashboard
+from routers import booking, demo, dashboard, admin
 
 # Configure logging for production
 logging.basicConfig(
@@ -36,6 +36,7 @@ app.include_router(twilio.router)
 app.include_router(booking.router)
 app.include_router(demo.router)
 app.include_router(dashboard.router, dependencies=[Depends(get_current_user)])
+app.include_router(admin.router)
 
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")

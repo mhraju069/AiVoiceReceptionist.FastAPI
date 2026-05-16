@@ -21,6 +21,10 @@ def _load_known_clients() -> list[dict]:
         return json.load(f)
 
 
+def list_known_clients() -> list[dict]:
+    return list(_load_known_clients())
+
+
 def find_known_client_by_phone(phone: str) -> Optional[dict]:
     normalized = normalize_phone(phone)
     if not normalized:
@@ -30,6 +34,51 @@ def find_known_client_by_phone(phone: str) -> Optional[dict]:
         if normalize_phone(client.get("phone", "")) == normalized:
             return client
     return None
+
+
+def save_known_clients(clients: list[dict]) -> None:
+    KNOWN_CLIENTS_PATH.write_text(json.dumps(clients, indent=2), encoding="utf-8")
+    _load_known_clients.cache_clear()
+
+
+def upsert_known_client(client: dict) -> dict:
+    clients = list_known_clients()
+    normalized = normalize_phone(client.get("phone", ""))
+    if not normalized:
+        raise ValueError("Phone number is required")
+
+    clean_client = {
+        "plan": client.get("plan") or "None",
+        "first_name": client.get("first_name") or "",
+        "last_name": client.get("last_name") or "",
+        "phone": client.get("phone") or "",
+        "email": client.get("email") or "",
+        "business_name": client.get("business_name") or "",
+        "notes": client.get("notes") or "",
+    }
+
+    for index, existing in enumerate(clients):
+        if normalize_phone(existing.get("phone", "")) == normalized:
+            clients[index] = clean_client
+            save_known_clients(clients)
+            return clean_client
+
+    clients.append(clean_client)
+    save_known_clients(clients)
+    return clean_client
+
+
+def delete_known_client(phone: str) -> bool:
+    normalized = normalize_phone(phone)
+    clients = list_known_clients()
+    remaining = [
+        client for client in clients
+        if normalize_phone(client.get("phone", "")) != normalized
+    ]
+    if len(remaining) == len(clients):
+        return False
+    save_known_clients(remaining)
+    return True
 
 
 def profile_from_known_client(client: dict) -> dict:

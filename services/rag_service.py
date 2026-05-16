@@ -1,4 +1,18 @@
 import os
+from pathlib import Path
+
+
+KNOWLEDGE_PATH = Path(__file__).resolve().parents[1] / "data" / "knowledge.txt"
+DEFAULT_KNOWLEDGE = (
+    "Pay Minimum Tax is an ultra-premium AI receptionist that assists "
+    "businesses in handling calls efficiently."
+)
+
+
+def save_knowledge(content: str) -> None:
+    """Persist the company knowledge base used by the AI prompt."""
+    KNOWLEDGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    KNOWLEDGE_PATH.write_text(content, encoding="utf-8")
 
 def load_knowledge() -> str:
     """
@@ -15,4 +29,4 @@ def load_knowledge() -> str:
         if os.path.exists(p):
             with open(p, "r", encoding="utf-8") as f:
                 return f.read()
-    return "Pay Minimum Tax is an ultra-premium AI receptionist that assists businesses in handling calls efficiently."
+    return DEFAULT_KNOWLEDGE
