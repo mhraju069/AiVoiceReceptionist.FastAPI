@@ -521,12 +521,6 @@ async def demo_voice_stream(websocket: WebSocket):
         async def silence_watchdog():
             """If the caller is silent for 12s after the AI finishes speaking, send a gentle nudge."""
             SILENCE_TIMEOUT = 12  # seconds to wait before nudging
-            nudge_messages = [
-                "Are you still with me?",
-                "জি, শুনতে পাচ্ছেন?",
-                "Hello? Are you still there?",
-            ]
-            nudge_index = 0
             while not call_done.is_set():
                 await asyncio.sleep(1)
                 if not watchdog_active[0] or not openai_ws:
@@ -537,17 +531,15 @@ async def demo_voice_stream(websocket: WebSocket):
                 elapsed = asyncio.get_event_loop().time() - t
                 if elapsed >= SILENCE_TIMEOUT and not caller_spoke_after_ai[0]:
                     # Inject a gentle nudge via OpenAI
-                    nudge = nudge_messages[nudge_index % len(nudge_messages)]
-                    nudge_index += 1
                     try:
                         await openai_ws.send(json.dumps({
                             "type": "response.create",
                             "response": {
                                 "modalities": ["text", "audio"],
-                                "instructions": f"The caller has been silent for a while. Ask them: '{nudge}' — say it naturally, then wait."
+                                "instructions": "The caller has been silent for a while. Politely ask if they are still there (e.g. 'Are you still with me?'). IMPORTANT: Ask in the EXACT same language (English or Bangla) that the conversation is currently in. Keep it to one short natural sentence."
                             }
                         }))
-                        await _debug("silence_nudge", f"⏱️ Silence timeout — sending nudge: {nudge}")
+                        await _debug("silence_nudge", "⏱️ Silence timeout — sending dynamic nudge")
                     except Exception:
                         pass
                     # Reset timer so we don't spam — next nudge in another 15s

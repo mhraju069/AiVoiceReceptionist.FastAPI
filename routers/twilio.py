@@ -381,8 +381,9 @@ async def twilio_stream(websocket: WebSocket):
                     "instructions": instructions + f"""
 
                     # ADDITIONAL SESSION RULES
-                    - You are BILINGUAL: English and Bangla ONLY.
-                    - If the caller speaks Bangla, respond in Dhaka Bangla.
+                    - You are BILINGUAL: English and Bangla ONLY. Default is English.
+                    - CRITICAL: Do NOT switch to Bangla just because the caller has a Bengali-sounding name. A name is not a language change.
+                    - If the caller speaks a full sentence in Bangla, respond in Dhaka Bangla.
                     - If the caller speaks English, respond in English.
                     - IGNORE any Spanish, Chinese, or Portuguese hallucinations from the transcription.
                     - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
@@ -891,12 +892,6 @@ async def twilio_stream(websocket: WebSocket):
     async def silence_watchdog():
         """After 12s of caller silence post-AI response, inject a gentle nudge."""
         SILENCE_TIMEOUT = 12
-        nudge_messages = [
-            "Are you still with me?",
-            "জি, শুনতে পাচ্ছেন?",
-            "Hello? Are you still there?",
-        ]
-        nudge_index = 0
         while not call_done.is_set():
             await asyncio.sleep(1)
             if not watchdog_active[0] or not openai_ws:
@@ -906,17 +901,15 @@ async def twilio_stream(websocket: WebSocket):
                 continue
             elapsed = asyncio.get_event_loop().time() - t
             if elapsed >= SILENCE_TIMEOUT and not caller_spoke_after_ai[0]:
-                nudge = nudge_messages[nudge_index % len(nudge_messages)]
-                nudge_index += 1
                 try:
                     await openai_ws.send(json.dumps({
                         "type": "response.create",
                         "response": {
                             "modalities": ["text", "audio"],
-                            "instructions": f"The caller has been silent for a while. Ask: '{nudge}' — say it naturally and wait."
+                            "instructions": "The caller has been silent for a while. Politely ask if they are still there (e.g. 'Are you still with me?'). IMPORTANT: Ask in the EXACT same language (English or Bangla) that the conversation is currently in. Keep it to one short natural sentence."
                         }
                     }))
-                    logger.info(f"⏱️ [Watchdog] Silence nudge sent: {nudge}")
+                    logger.info("⏱️ [Watchdog] Dynamic silence nudge sent.")
                 except Exception:
                     pass
                 last_ai_response_done_at[0] = asyncio.get_event_loop().time()
@@ -977,32 +970,49 @@ async def twilio_stream(websocket: WebSocket):
                         reason = "Inquiry"
                         lead_status = "Inquiry"
                         tags = ""
-
-                db = SessionLocal()
-                try:
-                    new_log = CallLog(
-                        call_sid=call_sid or stream_sid,
-                        caller_number=caller_number,
-                        transcript=full_transcript,
-                        summary=summary,
-                        reason=reason,
-                        intent=intent,
-                        outcome=outcome,
-                        lead_status=lead_status,
-                        tags=tags,
-                        start_time=start_time_dt,
-                        end_time=datetime.datetime.utcnow(),
-                        duration=int((datetime.datetime.utcnow() - start_time_dt).total_seconds())
-                    )
-                    db.add(new_log)
-                    db.commit()
-                    logger.info(f"💾 [Database] Call log saved for SID: {call_sid or stream_sid}")
-                except Exception as db_err:
-                    logger.error(f"🔴 [Database] Error saving call log: {db_err}")
-                    db.rollback()
-                finally:
-                    db.close()
             except Exception as e:
-                logger.error(f"🔴 [Database] Error in post-call processing: {e}")
+                logger.error(f"🔴 [Analysis] Error in post-call analysis: {e}")
+                summary = "Error analyzing call."
+                reason = "Unknown"
+                intent = "Unknown"
+                outcome = "Unknown"
+                lead_status = "Unknown"
+                tags = ""
+        else:
+            full_transcript = ""
+            summary = "Call was too short or no transcript available."
+            reason = "Short Call"
+            intent = "Unknown"
+            outcome = "Missed/Dropped"
+            lead_status = "Unknown"
+            tags = ""
+
+        try:
+            db = SessionLocal()
+            try:
+                new_log = CallLog(
+                    call_sid=call_sid or stream_sid,
+                    caller_number=caller_number,
+                    transcript=full_transcript,
+                    summary=summary,
+                    reason=reason,
+                    intent=intent,
+                    outcome=outcome,
+                    lead_status=lead_status,
+                    tags=tags,
+                    start_time=start_time_dt,
+                    end_time=datetime.datetime.utcnow(),
+                    duration=int((datetime.datetime.utcnow() - start_time_dt).total_seconds())
+                )
+                db.add(new_log)
+                db.commit()
+                logger.info(f"💾 [Database] Call log saved for SID: {call_sid or stream_sid}")
+            except Exception as db_err:
+                logger.error(f"🔴 [Database] Error saving call log: {db_err}")
+                db.rollback()
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"🔴 [Database] Error in post-call processing: {e}")
 
         logger.info("Bidirectional voice session closed.")
