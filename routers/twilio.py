@@ -8,6 +8,7 @@ from database import SessionLocal
 from models.activity_models import CallLog
 from config import FORWARD_SIMON, FORWARD_TANZINA, FORWARD_ALEX, FORWARD_NAFI
 from services.known_clients import find_known_client_by_phone, profile_from_known_client
+from services.openai_realtime import get_openai_realtime_model, get_openai_realtime_ws_url
 
 router = APIRouter(
     prefix="/api/twilio",
@@ -29,10 +30,8 @@ FORWARD_MAP = {
 
 # Configuration for real-time conversational AI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_WS_URL = os.getenv(
-    "OPENAI_WS_URL", 
-    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
-)
+OPENAI_REALTIME_MODEL = get_openai_realtime_model()
+OPENAI_WS_URL = get_openai_realtime_ws_url()
 
 IGNORED_TRANSCRIPT_WORDS = {
     "hello",
@@ -96,10 +95,15 @@ async def create_session():
     }
     
     data = {
-        "model": "gpt-4o-realtime-preview",
-        "modalities": ["audio", "text"],
-        "voice": "shimmer",
+        "type": "realtime",
+        "model": OPENAI_REALTIME_MODEL,
+        "output_modalities": ["audio"],
         "instructions": instructions,
+        "audio": {
+            "output": {
+                "voice": "shimmer",
+            },
+        },
     }
     
     async with httpx.AsyncClient() as client:
@@ -365,7 +369,6 @@ async def twilio_stream(websocket: WebSocket):
             logger.info("🤖 [OpenAI] Attempting to connect to OpenAI Realtime API...")
             headers = {
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "OpenAI-Beta": "realtime=v1"
             }
             openai_ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
             logger.info("🟢 [OpenAI] Successfully connected to OpenAI Realtime API.")
@@ -377,7 +380,9 @@ async def twilio_stream(websocket: WebSocket):
             session_update = {
                 "type": "session.update",
                 "session": {
-                    "modalities": ["text", "audio"],
+                    "type": "realtime",
+                    "model": OPENAI_REALTIME_MODEL,
+                    "output_modalities": ["audio"],
                     "instructions": instructions + f"""
 
                     # ADDITIONAL SESSION RULES
@@ -412,19 +417,25 @@ async def twilio_stream(websocket: WebSocket):
                     - If Prospect, follow the standard intro and qualification workflow.
                     """,
                     
-                    "voice": "shimmer",
-                    "input_audio_format": "g711_ulaw",
-                    "output_audio_format": "g711_ulaw",
-                    "input_audio_transcription": {
-                        "model": "whisper-1"
-                    },
-                    # Auto-detect when the caller finishes speaking and trigger a response
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.85,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 600,
-                        "create_response": False,
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcmu"},
+                            "transcription": {
+                                "model": "whisper-1"
+                            },
+                            # Auto-detect when the caller finishes speaking and trigger a response
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": 0.85,
+                                "prefix_padding_ms": 300,
+                                "silence_duration_ms": 600,
+                                "create_response": False,
+                            },
+                        },
+                        "output": {
+                            "format": {"type": "audio/pcmu"},
+                            "voice": "shimmer",
+                        },
                     },
                     "tools": [
                         {
@@ -538,7 +549,7 @@ async def twilio_stream(websocket: WebSocket):
             initial_greeting = {
                 "type": "response.create",
                 "response": {
-                    "modalities": ["text", "audio"],
+                    "output_modalities": ["audio"],
                     "instructions": greeting_instruction
                 }
             }
@@ -653,7 +664,7 @@ async def twilio_stream(websocket: WebSocket):
                     logger.info(f"🟢 [OpenAI] New response started: {current_response_id}")
 
                 # Process assistant's generated audio response
-                elif event_type == "response.audio.delta":
+                elif event_type in ("response.audio.delta", "response.output_audio.delta"):
                     # DROP all audio chunks if caller interrupted
                     if interrupt_event.is_set():
                         continue
@@ -748,7 +759,12 @@ async def twilio_stream(websocket: WebSocket):
                     logger.info(f"✅ [OpenAI] Response {done_id} finished ({event_type}). Audio Duration: {audio_duration_sec:.2f}s")
                 
                 # Additional debug logging for other important OpenAI events
-                elif event_type in ("response.text.done", "response.audio_transcript.done"):
+                elif event_type in (
+                    "response.text.done",
+                    "response.output_text.done",
+                    "response.audio_transcript.done",
+                    "response.output_audio_transcript.done",
+                ):
                     text = openai_data.get("text") or openai_data.get("transcript")
                     if text:
                         logger.info(f"\n🤖 [AI Reply]: {text}")
@@ -905,7 +921,7 @@ async def twilio_stream(websocket: WebSocket):
                     await openai_ws.send(json.dumps({
                         "type": "response.create",
                         "response": {
-                            "modalities": ["text", "audio"],
+                            "output_modalities": ["audio"],
                             "instructions": "The caller has been silent for a while. Politely ask if they are still there (e.g. 'Are you still with me?'). IMPORTANT: Ask in the EXACT same language (English or Bangla) that the conversation is currently in. Keep it to one short natural sentence."
                         }
                     }))

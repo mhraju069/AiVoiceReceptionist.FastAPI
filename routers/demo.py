@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
+from services.openai_realtime import get_openai_realtime_model, get_openai_realtime_ws_url
 from services.prompts import system_prompt
 from routers.twilio import ADS
 router = APIRouter(
@@ -27,10 +28,8 @@ router = APIRouter(
 debug_clients: List[WebSocket] = []
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_WS_URL = os.getenv(
-    "OPENAI_WS_URL",
-    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
-)
+OPENAI_REALTIME_MODEL = get_openai_realtime_model()
+OPENAI_WS_URL = get_openai_realtime_ws_url()
 
 
 async def broadcast_debug(event: str, message: str, data: dict = None):
@@ -109,7 +108,6 @@ async def demo_voice_stream(websocket: WebSocket):
 
                 headers = {
                     "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "OpenAI-Beta": "realtime=v1"
                 }
                 openai_ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
                 await _debug("openai_connected", "🟢 OpenAI Realtime API connected!")
@@ -119,7 +117,9 @@ async def demo_voice_stream(websocket: WebSocket):
                 session_update = {
                     "type": "session.update",
                     "session": {
-                        "modalities": ["text", "audio"],
+                        "type": "realtime",
+                        "model": OPENAI_REALTIME_MODEL,
+                        "output_modalities": ["audio"],
                         "instructions": instructions + """
                         
                         # ADDITIONAL SESSION RULES
@@ -142,15 +142,21 @@ async def demo_voice_stream(websocket: WebSocket):
 
                         # Note: Since this is a Demo session, assume the user is this Class A Client. Greet them by name and handle as VIP.
                         # """
-                        "voice": "shimmer",
-                        "input_audio_format": "pcm16",
-                        "output_audio_format": "pcm16",
-                        "input_audio_transcription": {"model": "whisper-1"},
-                        "turn_detection": {
-                            "type": "server_vad",
-                            "threshold": 0.85,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 600
+                        "audio": {
+                            "input": {
+                                "format": {"type": "audio/pcm", "rate": 24000},
+                                "transcription": {"model": "whisper-1"},
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                    "threshold": 0.85,
+                                    "prefix_padding_ms": 300,
+                                    "silence_duration_ms": 600
+                                },
+                            },
+                            "output": {
+                                "format": {"type": "audio/pcm", "rate": 24000},
+                                "voice": "shimmer",
+                            },
                         },
                         "tools": [
                             {
@@ -228,7 +234,7 @@ async def demo_voice_stream(websocket: WebSocket):
                 initial_greeting = {
                     "type": "response.create",
                     "response": {
-                        "modalities": ["text", "audio"],
+                        "output_modalities": ["audio"],
                         "instructions": f"Greet the caller by saying: \"{selected_greeting}\". Speak it naturally and warmly. IMPORTANT: Use ONLY English or Bangla. NEVER use any other language."
                     }
                 }
@@ -320,7 +326,7 @@ async def demo_voice_stream(websocket: WebSocket):
                         interrupt_event.clear()  # Allow audio for this new response
                         response_audio_sent_ms = 0
 
-                    elif evt == "response.audio.delta":
+                    elif evt in ("response.audio.delta", "response.output_audio.delta"):
                         if interrupt_event.is_set():
                             continue
                         item_id = openai_data.get("item_id")
@@ -337,7 +343,12 @@ async def demo_voice_stream(websocket: WebSocket):
                         if ai_chunk_count % 50 == 0:
                             await _debug("ai_audio", f"🎙️ Streamed {ai_chunk_count} AI audio chunks")
 
-                    elif evt in ["response.text.done", "response.audio_transcript.done"]:
+                    elif evt in (
+                        "response.text.done",
+                        "response.output_text.done",
+                        "response.audio_transcript.done",
+                        "response.output_audio_transcript.done",
+                    ):
                         text = openai_data.get("text") or openai_data.get("transcript")
                         if text:
                             ai_transcripts.append(text)
@@ -418,7 +429,7 @@ async def demo_voice_stream(websocket: WebSocket):
                             await openai_ws.send(json.dumps({
                                 "type": "response.create",
                                 "response": {
-                                    "modalities": ["text", "audio"],
+                                    "output_modalities": ["audio"],
                                     "instructions": f"Translate and say this in the SAME LANGUAGE the user is currently speaking (English or Bangla): 'Please hold on for a moment while I connect you to {target}.' Then, switch to ENGLISH and say this advertisement naturally: '{ad_msg}'. Then switch back to the user's language and say: 'I am still trying to connect you, please wait.'"
                                 }
                             }))
@@ -430,7 +441,7 @@ async def demo_voice_stream(websocket: WebSocket):
                                 await openai_ws.send(json.dumps({
                                     "type": "response.create",
                                     "response": {
-                                        "modalities": ["text", "audio"],
+                                        "output_modalities": ["audio"],
                                         "instructions": "In the SAME LANGUAGE the user is speaking, say: 'I am sorry, they haven\'t picked up yet. I am still trying to connect, please stay on the line.'"
                                     }
                                 }))
@@ -441,7 +452,7 @@ async def demo_voice_stream(websocket: WebSocket):
                                 await openai_ws.send(json.dumps({
                                     "type": "response.create",
                                     "response": {
-                                        "modalities": ["text", "audio"],
+                                        "output_modalities": ["audio"],
                                         "instructions": f"In the SAME LANGUAGE the user is speaking, say: 'I am sorry, {target} is not available right now. I\'ll make sure they get your message. Is there anything else I can help you with today?'"
                                     }
                                 }))
@@ -535,7 +546,7 @@ async def demo_voice_stream(websocket: WebSocket):
                         await openai_ws.send(json.dumps({
                             "type": "response.create",
                             "response": {
-                                "modalities": ["text", "audio"],
+                                "output_modalities": ["audio"],
                                 "instructions": "The caller has been silent for a while. Politely ask if they are still there (e.g. 'Are you still with me?'). IMPORTANT: Ask in the EXACT same language (English or Bangla) that the conversation is currently in. Keep it to one short natural sentence."
                             }
                         }))
