@@ -9,6 +9,13 @@ from models.activity_models import CallLog
 from config import FORWARD_SIMON, FORWARD_TANZINA, FORWARD_ALEX, FORWARD_NAFI
 from services.known_clients import find_known_client_by_phone, profile_from_known_client
 from services.openai_realtime import get_openai_realtime_model, get_openai_realtime_ws_url
+from routers.common_tools import (
+    ADS,
+    handle_book_appointment,
+    handle_get_slots,
+    handle_transfer_call,
+    handle_end_call,
+)
 
 router = APIRouter(
     prefix="/api/twilio",
@@ -283,12 +290,7 @@ async def make_outbound_call(request: Request):
             raise HTTPException(status_code=500, detail=str(e))
 
 
-ADS = [
-    "Stop overpaying. Join our waitlist for a free tax savings review with our CPA. We'll reach out as soon as a spot opens up.",
-    "We don't just find savings; we help you keep them. Our team guides you through the entire process, ensuring you never feel left behind.",
-    "Personalized tax strategies, not generic templates. We build a plan around your needs and execute it with precision.",
-    "Paying over $30k in business taxes or earning $50k+ on a 1099? You're likely overpaying. Contact us for a complimentary CPA review to see how much you could save."
-]
+
 
 
 def _public_base_url(host: str, default_protocol: str = "https") -> str:
@@ -928,81 +930,11 @@ async def twilio_stream(websocket: WebSocket):
                     args = json.loads(openai_data.get("arguments", "{}"))
                     logger.info(f"\n🛠️ [OpenAI] AI called tool '{func_name}' with args: {args}")
                     
-                    if func_name == "book_appointment":
-                        from services.booking_service import book_appointment
-                        try:
-                            result = await book_appointment(
-                                name=args.get("name", "Caller"),
-                                email=args.get("email", ""),
-                                phone=args.get("phone", ""),
-                                booking_slot=args.get("booking_slot", ""),
-                                calendar_type=args.get("calendar_type", "follow_up_b"),
-                                call_summary=args.get("call_summary", ""),
-                            )
-                            logger.info(f"✅ [OpenAI] Booking result: {result.get('status')}")
-                        except Exception as e:
-                            result = {"status": "error", "message": "Sorry, there was a technical issue booking your appointment. Please try again later."}
-                            logger.info(f"🔴 [OpenAI] Booking exception: {e}")
-                    
-                    elif func_name == "get_available_slots":
-                        from services.booking_service import get_slots
-                        try:
-                            result = await get_slots(
-                                calendar_type=args.get("calendar_type", "follow_up_b")
-                            )
-                            logger.info(f"✅ [OpenAI] Slots fetched successfully.")
-                        except Exception as e:
-                            result = {"status": "error", "message": "Could not fetch available slots."}
-                            logger.info(f"🔴 [OpenAI] Slot fetch exception: {e}")
+                    async def _log_adapter(event, message):
+                        logger.info(f"[{event}] {message}")
 
-                    elif func_name == "transfer_call":
-                        target = args.get("target", "tanzina").lower()
-                        reason = args.get("reason", "")
-                        to_number = FORWARD_MAP.get(target, "")
-                        logger.info(f"📲 [Transfer] AI requested transfer to '{target}' ({to_number}). Reason: {reason}")
-
-                        if not to_number:
-                            logger.error(f"🔴 [Transfer] No number configured for '{target}'. Simulating unavailable flow anyway.")
-
-                        ad_msg = random.choice(ADS)
-                        logger.info(f"📣 [Transfer] Simulated hold ad selected: {ad_msg[:50]}...")
-
-                        await openai_ws.send(json.dumps({
-                            "type": "response.create",
-                            "response": {
-                                "output_modalities": ["audio"],
-                                "instructions": f"Translate and say this in the SAME LANGUAGE the user is currently speaking (English or Bangla): 'Please hold on for a moment while I connect you to {target}.' Then, switch to ENGLISH and say this advertisement naturally: '{ad_msg}'"
-                            }
-                        }))
-
-                        async def _simulated_transfer_flow():
-                            await asyncio.sleep(12)
-                            if call_done.is_set():
-                                return
-                            logger.info("⏳ [Transfer] Still trying to connect (12s mark).")
-                            await openai_ws.send(json.dumps({
-                                "type": "response.create",
-                                "response": {
-                                    "output_modalities": ["audio"],
-                                    "instructions": "In the SAME LANGUAGE the user is speaking, say: 'I am sorry, they haven\\'t picked up yet. I am still trying to connect, please stay on the line.'"
-                                }
-                            }))
-
-                            await asyncio.sleep(12)
-                            if call_done.is_set():
-                                return
-                            logger.info("❌ [Transfer] Simulated transfer failed; target unavailable.")
-                            await openai_ws.send(json.dumps({
-                                "type": "response.create",
-                                "response": {
-                                    "output_modalities": ["audio"],
-                                    "instructions": f"In the SAME LANGUAGE the user is speaking, say: 'I am sorry, {target} is not available right now. I\\'ll make sure they get your message. Is there anything else I can help you with today?'"
-                                }
-                            }))
-
-                        asyncio.create_task(_simulated_transfer_flow())
-                        result = {"status": "success", "message": f"Transferring to {target}"}
-
+                    if func_name == "transfer_call":
+                        result = await handle_transfer_call(args, openai_ws, call_done, call_id, _log_adapter)
                         await openai_ws.send(json.dumps({
                             "type": "conversation.item.create",
                             "item": {
@@ -1013,60 +945,24 @@ async def twilio_stream(websocket: WebSocket):
                         }))
                         continue
 
+                    elif func_name == "book_appointment":
+                        result = await handle_book_appointment(args, _log_adapter)
+                    
+                    elif func_name == "get_available_slots":
+                        result = await handle_get_slots(args, _log_adapter)
+                    
                     elif func_name == "end_call":
-                        reason = args.get("reason", "task_complete")
-                        logger.info(f"👋 [EndCall] AI requested call end. Reason: {reason}")
-                        
-                        result = {"status": "success", "message": "Call ended."}
-                        # Send tool result back but DON'T trigger another response
-                        await openai_ws.send(json.dumps({
-                            "type": "conversation.item.create",
-                            "item": {
-                                "type": "function_call_output",
-                                "call_id": call_id,
-                                "output": json.dumps(result)
-                            }
-                        }))
-                        
-                        if not end_call_in_progress[0]:
-                            end_call_in_progress[0] = True
-                            async def _delayed_hangup():
-                                # Detect language from transcript accumulator
-                                is_bangla_convo = False
-                                for entry in reversed(transcript_accumulator):
-                                    if any('\u0980' <= char <= '\u09FF' for char in entry):
-                                        is_bangla_convo = True
-                                        break
-                                
-                                if is_bangla_convo:
-                                    goodbye_instr = "In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking."
-                                else:
-                                    goodbye_instr = "In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking."
-
-                                try:
-                                    await openai_ws.send(json.dumps({"type": "response.cancel"}))
-                                except Exception:
-                                    pass
-                                
-                                try:
-                                    await openai_ws.send(json.dumps({
-                                        "type": "response.create",
-                                        "response": {
-                                            "output_modalities": ["audio"],
-                                            "instructions": goodbye_instr
-                                        }
-                                    }))
-                                    logger.info(f"✅ [EndCall Tool] Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then hanging up.")
-                                except Exception as e:
-                                    logger.error(f"Error triggering goodbye: {e}")
-                                
-                                await asyncio.sleep(4)
-                                await _hangup_call()
-                            asyncio.create_task(_delayed_hangup())
-                        else:
-                            logger.info("⏳ [EndCall] End call already in progress. Skipping duplicate hangup.")
-                        
-                        continue   # skip the response.create at the bottom
+                        await handle_end_call(
+                            args,
+                            openai_ws,
+                            call_done,
+                            end_call_in_progress,
+                            transcript_accumulator,
+                            call_id,
+                            _log_adapter,
+                            _hangup_call
+                        )
+                        continue
 
                     elif func_name == "record_message":
                         caller_name_arg  = args.get("caller_name", contact_name)
