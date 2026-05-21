@@ -72,6 +72,21 @@ OFFICE_OPEN = datetime_time(10, 0)
 OFFICE_CLOSE = datetime_time(16, 0)
 
 
+def get_calendar_config(calendar_type: str = "follow_up_b") -> dict:
+    return CALENDARS.get(calendar_type, CALENDARS["follow_up_b"])
+
+
+def get_calendar_price(calendar_type: str = "follow_up_b") -> int:
+    return int(get_calendar_config(calendar_type).get("price") or 0)
+
+
+def get_calendar_price_by_id(calendar_id: str) -> int:
+    for config in CALENDARS.values():
+        if config.get("id") == calendar_id:
+            return int(config.get("price") or 0)
+    return 0
+
+
 def _timezone_from_offset(slot: str, fallback: str = OFFICE_TIMEZONE) -> str:
     """Infer the GHL timezone string from the ISO offset in the slot."""
     if slot.endswith("Z"):
@@ -119,7 +134,7 @@ def validate_office_slot(slot: str) -> tuple[bool, str]:
 
 async def get_slots(calendar_type: str = "follow_up_b", timezone: str = OFFICE_TIMEZONE) -> dict:
     """Fetch available slots for the next 7 days from GHL for a specific calendar."""
-    cal_config = CALENDARS.get(calendar_type, CALENDARS["follow_up_b"])
+    cal_config = get_calendar_config(calendar_type)
     calendar_id = cal_config["id"]
     
     url = f"{GHL_BASE_URL}/appointments/slots"
@@ -148,12 +163,13 @@ async def book_appointment(
     call_summary: str,
     calendar_type: str = "follow_up_b", # Default type
     timezone: str = OFFICE_TIMEZONE,
+    is_known_client: bool = False,
 ) -> dict:
-    """Full booking flow: find/create contact, check priority, book slot or request payment."""
+    """Book known clients directly; send prospects a payment link before booking."""
     print(f"\n📋 [BookingService] phone={phone}, email={email}, slot={booking_slot}, type={calendar_type}")
 
     # Get calendar config
-    cal_config = CALENDARS.get(calendar_type, CALENDARS["follow_up_b"])
+    cal_config = get_calendar_config(calendar_type)
     calendar_id = cal_config["id"]
     
     is_valid_slot, slot_error = validate_office_slot(booking_slot)
@@ -185,7 +201,43 @@ async def book_appointment(
         )
         print(f"✅ [BookingService] Existing contact: {contact_id} ({contact_name})")
     else:
-        # Create new contact
+        contact_id = ""
+        contact_name = name or "Caller"
+
+    # Step 2: Known clients book directly. Unknown/prospect callers must pay first.
+    tags = existing_contact.get("tags", []) if existing_contact else []
+    normalized_tags = [t.strip().upper() for t in tags]
+    priority_check_tags = [g.strip().upper() for g in PRIORITY_GROUPS]
+    is_priority = any(tag in priority_check_tags for tag in normalized_tags)
+    is_direct_booking = is_known_client or is_priority
+    price = int(cal_config["price"] or 0)
+
+    if not is_direct_booking:
+        print(f"💰 [BookingService] Prospect/unknown caller. Payment required before booking: ${price}")
+        print(f"🔗 [BookingService] Generating and emailing payment link for {email}...")
+        payment_url = await create_stripe_payment_link(
+            customer_email=email,
+            customer_name=name,
+            booking_slot=booking_slot,
+            call_summary=call_summary,
+            calendar_id=calendar_id,
+            customer_phone=phone,
+            amount_cents=int(price * 100),
+        )
+        await send_stripe_payment_link(
+            to_email=email,
+            contact_name=name or "Caller",
+            payment_url=payment_url,
+            call_summary=call_summary,
+        )
+        return {
+            "status": "payment_required",
+            "price": price,
+            "payment_url": payment_url,
+            "message": f"To confirm your appointment, a payment of ${price} is required. A secure payment link has been sent to {email}. The appointment will be booked after payment is completed."
+        }
+
+    if not contact_id:
         new_contact_data = ContactCreate(
             firstName=name.split()[0] if name else "Caller",
             lastName=" ".join(name.split()[1:]) if len(name.split()) > 1 else "",
@@ -194,49 +246,11 @@ async def book_appointment(
         )
         created = await add_contact(new_contact_data)
         contact_id = created.get("contact", {}).get("id") or created.get("id")
-        contact_name = name
-        print(f"🆕 [BookingService] New contact created: {contact_id}")
+        contact_name = name or "Caller"
+        print(f"🆕 [BookingService] Known caller contact created: {contact_id}")
 
     if not contact_id:
         return {"status": "error", "message": "Could not find or create a contact in GHL."}
-
-    # Step 2: Check if contact is in Priority Groups (A, B, C, D)
-    tags = existing_contact.get("tags", []) if existing_contact else []
-    # Normalize tags for comparison
-    normalized_tags = [t.strip().upper() for t in tags]
-    priority_check_tags = [g.strip().upper() for g in PRIORITY_GROUPS]
-    
-    is_priority = any(tag in priority_check_tags for tag in normalized_tags)
-    
-    # Pricing Logic
-    price = cal_config["price"]
-    
-    # NEW RULE: If client is in Group A, B, C, or D, EVERYTHING is free and direct.
-    if is_priority:
-        requires_payment = False
-        print(f"⭐ [BookingService] Priority client detected ({tags}). Direct booking enabled.")
-    else:
-        # For non-priority users, follow-ups are free (if configured), others need payment.
-        requires_payment = price > 0
-        if requires_payment:
-            print(f"💰 [BookingService] Non-priority client. Payment required: ${price}")
-    
-    if requires_payment:
-        print(f"🔗 [BookingService] Generating payment link for {email}...")
-        # Create Stripe link
-        payment_url = await create_stripe_payment_link(
-            customer_email=email,
-            customer_name=name,
-            booking_slot=booking_slot,
-            call_summary=call_summary,
-            calendar_id=calendar_id,
-            customer_phone=phone,
-        )
-        return {
-            "status": "payment_required",
-            "payment_url": payment_url,
-            "message": f"To confirm your booking, a payment of ${price} is required. I've sent a secure payment link to your email ({email})."
-        }
 
     # Step 3: Create appointment (if free/direct)
     appointment_data = AppointmentCreate(

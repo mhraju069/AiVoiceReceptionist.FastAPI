@@ -10,6 +10,7 @@ async def create_stripe_payment_link(
     customer_name: str,
     booking_slot: str,
     call_summary: str,
+    amount_cents: int,
     calendar_id: str = "",
     customer_phone: str = "",
 ) -> str:
@@ -20,6 +21,8 @@ async def create_stripe_payment_link(
     """
     if not STRIPE_SECRET_KEY:
         raise ValueError("STRIPE_SECRET_KEY not configured")
+    if amount_cents <= 0:
+        raise ValueError("Payment amount must be greater than zero")
 
     url = "https://api.stripe.com/v1/checkout/sessions"
     headers = {
@@ -35,7 +38,7 @@ async def create_stripe_payment_link(
         "customer_email": customer_email,
         "line_items[0][price_data][currency]": "usd",
         "line_items[0][price_data][product_data][name]": "AI Receptionist Booking Fee",
-        "line_items[0][price_data][unit_amount]": "10000",  # $100.00 in cents
+        "line_items[0][price_data][unit_amount]": str(amount_cents),
         "line_items[0][quantity]": "1",
         "success_url": "https://payminimumtax.com/booking-success?session_id={CHECKOUT_SESSION_ID}",
         "cancel_url": "https://payminimumtax.com/booking-cancelled",

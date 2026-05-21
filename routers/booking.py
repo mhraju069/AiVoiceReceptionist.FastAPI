@@ -23,7 +23,12 @@ from services.ghl import add_contact, create_appointment, get_all_appointments
 from services.email_service import send_booking_confirmation, send_stripe_payment_link
 from services.stripe_service import create_stripe_payment_link
 from schemas import ContactCreate, AppointmentCreate
-from services.booking_service import OFFICE_TIMEZONE, validate_office_slot
+from services.booking_service import (
+    OFFICE_TIMEZONE,
+    get_calendar_price_by_id,
+    validate_office_slot,
+    _timezone_from_offset,
+)
 
 router = APIRouter(
     prefix="/api/booking",
@@ -210,6 +215,7 @@ async def process_booking(req: BookingRequest):
             call_summary=req.call_summary,
             calendar_id=req.calendar_id,
             customer_phone=req.phone,
+            amount_cents=get_calendar_price_by_id(req.calendar_id) * 100,
         )
 
         await send_stripe_payment_link(
@@ -338,22 +344,30 @@ async def stripe_webhook(
     # ────────────────────────────────────────────────────────────────────
     # Step 1: Create contact in GHL
     # ────────────────────────────────────────────────────────────────────
-    logger.info(f"\n📋 [Step 1/3] Creating GHL contact for '{customer_name}' <{customer_email}>...")
+    logger.info(f"\n📋 [Step 1/3] Finding or creating GHL contact for '{customer_name}' <{customer_email}>...")
     try:
-        contact_resp = await add_contact(ContactCreate(
+        existing_contact = await search_contact_by_phone_or_email(
+            phone=customer_phone,
             email=customer_email,
-            name=customer_name,
-            phone=customer_phone or None,
-            source="AI Call + Stripe Payment",
-            tags=["ai-call", "new-client", "stripe-paid"],
-        ))
-        # GHL v1 API returns {"contact": {id, ...}} or the object directly
-        contact_obj = contact_resp.get("contact") or contact_resp
-        contact_id  = contact_obj.get("id") or contact_obj.get("contactId", "unknown")
-        logger.info(f"✅ [Step 1/3] GHL contact created — ID: {contact_id}")
+        )
+        if existing_contact:
+            contact_id = existing_contact.get("id") or existing_contact.get("contactId", "unknown")
+            logger.info(f"✅ [Step 1/3] Existing GHL contact found — ID: {contact_id}")
+        else:
+            contact_resp = await add_contact(ContactCreate(
+                email=customer_email,
+                name=customer_name,
+                phone=customer_phone or None,
+                source="AI Call + Stripe Payment",
+                tags=["ai-call", "new-client", "stripe-paid"],
+            ))
+            # GHL v1 API returns {"contact": {id, ...}} or the object directly
+            contact_obj = contact_resp.get("contact") or contact_resp
+            contact_id = contact_obj.get("id") or contact_obj.get("contactId", "unknown")
+            logger.info(f"✅ [Step 1/3] GHL contact created — ID: {contact_id}")
     except Exception as exc:
-        logger.info(f"🔴 [Step 1/3] Failed to create GHL contact: {exc}")
-        raise HTTPException(status_code=500, detail=f"GHL contact creation failed: {exc}")
+        logger.info(f"🔴 [Step 1/3] Failed to find/create GHL contact: {exc}")
+        raise HTTPException(status_code=500, detail=f"GHL contact find/create failed: {exc}")
 
     # ────────────────────────────────────────────────────────────────────
     # Step 2: Book appointment in GHL
@@ -365,7 +379,7 @@ async def stripe_webhook(
             appt_resp = await create_appointment(AppointmentCreate(
                 contactId=contact_id,
                 calendarId=calendar_id,
-                selectedTimezone="Asia/Dhaka",
+                selectedTimezone=_timezone_from_offset(booking_slot),
                 selectedSlot=booking_slot,
                 title="Appointment After AI Call (Payment Completed)",
                 notes=(

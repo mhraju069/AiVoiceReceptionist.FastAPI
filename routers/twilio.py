@@ -1,7 +1,7 @@
 import logging
 logger = logging.getLogger(__name__)
 
-import os,json,base64,asyncio,httpx,datetime,html,random,re
+import os,json,base64,asyncio,httpx,datetime,html,random,re,urllib.parse
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect, HTTPException
 import websockets
 from database import SessionLocal
@@ -52,6 +52,123 @@ MEANINGFUL_SHORT_WORDS = {
     "okay",
     "bye",
 }
+
+
+END_CALL_CONSENT_WORDS = {
+    "yes",
+    "yeah",
+    "yep",
+    "ya",
+    "ok",
+    "okay",
+    "sure",
+    "ji",
+    "jee",
+    "jii",
+    "ha",
+    "haan",
+    "hya",
+    "acha",
+    "accha",
+    "kato",
+    "katen",
+    "katun",
+    "cut",
+    "bye",
+}
+
+END_CALL_CONSENT_PHRASES = (
+    "go ahead",
+    "you can",
+    "cut it",
+    "cut the call",
+    "end it",
+    "end the call",
+    "hang up",
+    "disconnect",
+    "no more",
+    "nothing else",
+    "that's all",
+    "thats all",
+    "all good",
+    "kete dao",
+    "kete den",
+    "kete din",
+    "cut kore den",
+    "kat kore den",
+    "কেটে দাও",
+    "কেটে দেন",
+    "কেটে দিন",
+    "কল কেটে",
+    "কলটা কেটে",
+    "আর কিছু না",
+    "আর লাগবে না",
+    "কিছু লাগবে না",
+)
+
+END_CALL_BANGLA_CONSENT = (
+    "হ্যাঁ",
+    "হ্যা",
+    "হা",
+    "জি",
+    "জী",
+    "ঠিক আছে",
+    "আচ্ছা",
+    "কাটো",
+    "কাটেন",
+    "কাটুন",
+    "কেটে",
+    "শেষ",
+)
+
+END_CALL_PERMISSION_CUES = (
+    "permission to end",
+    "permission to hang up",
+    "can i end",
+    "may i end",
+    "end the call now",
+    "hang up now",
+    "disconnect now",
+    "কল শেষ",
+    "কলটা শেষ",
+    "কল কেটে",
+    "কলটা কেটে",
+    "শেষ করতে",
+    "কেটে দিতে",
+    "কেটে দিই",
+    "কেটে দিতে পারি",
+    "শেষ করে দিই",
+    "শেষ করব",
+)
+
+
+def _normalized_words(text: str) -> list[str]:
+    cleaned = re.sub(r"[^A-Za-z0-9\u0980-\u09FF\s']", " ", text or "").lower()
+    return [word for word in cleaned.split() if word]
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(_normalized_words(text))
+
+
+def _asks_end_call_permission(text: str) -> bool:
+    lowered = (text or "").lower()
+    normalized = _normalized_text(text)
+    return any(cue in lowered or cue in normalized for cue in END_CALL_PERMISSION_CUES)
+
+
+def _is_end_call_consent(text: str) -> bool:
+    lowered = (text or "").lower()
+    normalized = _normalized_text(text)
+    words = set(normalized.split())
+
+    if words & END_CALL_CONSENT_WORDS:
+        return True
+    if any(phrase in lowered or phrase in normalized for phrase in END_CALL_CONSENT_PHRASES):
+        return True
+    if any(phrase in (text or "") for phrase in END_CALL_BANGLA_CONSENT):
+        return True
+    return False
 
 
 def _is_meaningful_transcript(text: str) -> bool:
@@ -174,21 +291,57 @@ ADS = [
 ]
 
 
+def _public_base_url(host: str, default_protocol: str = "https") -> str:
+    host = (host or "").strip().rstrip("/")
+    if not host:
+        return ""
+    if host.startswith(("http://", "https://")):
+        return host
+
+    is_local = host.startswith("localhost") or host.startswith("127.0.0.1")
+    protocol = "http" if is_local else default_protocol
+    return f"{protocol}://{host}"
+
+
+def _public_twilio_url(host: str, path: str, query: dict | None = None) -> str:
+    base_url = _public_base_url(host)
+    if not base_url:
+        return ""
+
+    path = path if path.startswith("/") else f"/{path}"
+    url = f"{base_url}{path}"
+    if query:
+        url = f"{url}?{urllib.parse.urlencode(query)}"
+    return url
+
+
+def _forward_number_from_query(raw_number: str) -> str:
+    raw_number = raw_number or ""
+    # Repair old unescaped URLs where "+1555..." arrived from the query as " 1555...".
+    if raw_number.startswith(" ") and raw_number.strip():
+        return f"+{raw_number.strip()}"
+    return raw_number.strip()
+
+
+def _twiml_text(text: str) -> str:
+    return html.escape(text or "", quote=False)
+
+
 @router.post("/forward-call")
 async def forward_call(request: Request):
     """
     TwiML endpoint Twilio calls when redirecting a call to a team member.
 
     Flow:
-      attempt=1 → "I'm connecting you..." + Ad → Dial(15s)
-      attempt=2 → "Still connecting, please hold..." → Dial(15s)
-      attempt≥3 → "Sorry, not available right now."
+      attempt=1 → "Please hold on for a moment while I connect you..." + Ad → Dial(15s)
+      attempt=2 → "I am sorry, they haven't picked up yet. I am still trying to connect, please stay on the line." → Dial(15s)
+      attempt≥3 → "I am sorry, they are not available right now. I'll make sure they get your message. Is there anything else I can help you with today?"
 
     Ads always play at least once (attempt 1) before any failure message.
     """
-    to_number = request.query_params.get("to", "")
+    to_number = _forward_number_from_query(request.query_params.get("to", ""))
     attempt   = int(request.query_params.get("attempt", "1"))
-    host      = os.getenv("PUBLIC_HOST", "")
+    host      = os.getenv("PUBLIC_HOST", request.headers.get("host", request.base_url.hostname))
 
     logger.info(f"📲 [Forward] to={to_number} attempt={attempt}")
 
@@ -200,9 +353,13 @@ async def forward_call(request: Request):
         return Response(content=twiml, media_type="text/xml")
 
     # Build the fallback URL that carries to/attempt forward
-    import urllib.parse as _ul
-    fallback_url = f"https://{host}/api/twilio/forward-fallback?to={_ul.quote(to_number)}&attempt={attempt}"
+    fallback_url = _public_twilio_url(
+        host,
+        "/api/twilio/forward-fallback",
+        {"to": to_number, "attempt": attempt},
+    )
     fallback_url_xml = html.escape(fallback_url, quote=True)
+    to_number_xml = html.escape(to_number, quote=False)
 
     if attempt == 1:
         # First attempt: play intro + ad, then dial
@@ -211,10 +368,10 @@ async def forward_call(request: Request):
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Joanna">Please hold on for a moment while I connect you.</Say>
-    <Say voice="Polly.Joanna">{ad_message}</Say>
+    <Say voice="Polly.Joanna">{_twiml_text(ad_message)}</Say>
     <Say voice="Polly.Joanna">I'm still trying to connect you, please wait.</Say>
     <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url_xml}">
-        <Number>{to_number}</Number>
+        <Number>{to_number_xml}</Number>
     </Dial>
 </Response>"""
 
@@ -224,7 +381,7 @@ async def forward_call(request: Request):
 <Response>
     <Say voice="Polly.Joanna">They haven't picked up yet. I'm still trying — please stay on the line.</Say>
     <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url_xml}">
-        <Number>{to_number}</Number>
+        <Number>{to_number_xml}</Number>
     </Dial>
 </Response>"""
 
@@ -232,7 +389,7 @@ async def forward_call(request: Request):
         # All attempts exhausted — person is unavailable
         twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="Polly.Joanna">I'm sorry, they are not available right now. I'll make sure they get your message and call you back as soon as possible. Thank you for your patience.</Say>
+    <Say voice="Polly.Joanna">I am sorry, they are not available right now. I'll make sure they get your message. Is there anything else I can help you with today?</Say>
 </Response>"""
 
     return Response(content=twiml, media_type="text/xml")
@@ -246,9 +403,9 @@ async def forward_fallback(request: Request):
     """
     form_data   = await request.form()
     dial_status = form_data.get("DialCallStatus", "no-answer")
-    to_number   = request.query_params.get("to", "")
+    to_number   = _forward_number_from_query(request.query_params.get("to", ""))
     attempt     = int(request.query_params.get("attempt", "1"))
-    host        = os.getenv("PUBLIC_HOST", "")
+    host        = os.getenv("PUBLIC_HOST", request.headers.get("host", request.base_url.hostname))
 
     logger.info(f"📵 [Fallback] DialCallStatus={dial_status} to={to_number} attempt={attempt}")
 
@@ -258,9 +415,12 @@ async def forward_fallback(request: Request):
 <Response></Response>"""
     else:
         # Not answered — try again or give up
-        import urllib.parse as _ul
         next_attempt  = attempt + 1
-        next_url      = f"https://{host}/api/twilio/forward-call?to={_ul.quote(to_number)}&attempt={next_attempt}"
+        next_url = _public_twilio_url(
+            host,
+            "/api/twilio/forward-call",
+            {"to": to_number, "attempt": next_attempt},
+        )
         next_url_xml = html.escape(next_url, quote=False)
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -318,6 +478,7 @@ async def incoming_call(request: Request):
         "email": email,
         "business_name": business_name,
         "client_notes": client_notes,
+        "public_host": host,
     })
     stream_url = f"{ws_protocol}://{host}/api/twilio/stream?{params}"
     stream_url_xml = html.escape(stream_url, quote=True)
@@ -362,6 +523,7 @@ async def twilio_stream(websocket: WebSocket):
     last_ai_response_done_at: list = [None]
     caller_spoke_after_ai: list = [False]
     watchdog_active: list = [False]
+    end_call_permission_pending: list = [False]
 
     # Connect to OpenAI Realtime API if the API key is present
     if OPENAI_API_KEY:
@@ -383,38 +545,17 @@ async def twilio_stream(websocket: WebSocket):
                     "type": "realtime",
                     "model": OPENAI_REALTIME_MODEL,
                     "output_modalities": ["audio"],
-                    "instructions": instructions + f"""
+                    "instructions": instructions + """
 
                     # ADDITIONAL SESSION RULES
-                    - You are BILINGUAL: English and Bangla ONLY. Default is English.
-                    - CRITICAL: Do NOT switch to Bangla just because the caller has a Bengali-sounding name. A name is not a language change.
-                    - If the caller speaks a full sentence in Bangla, respond in Dhaka Bangla.
+                    - You are BILINGUAL: English and Bangla ONLY.
+                    - If the caller speaks Bangla, respond in Dhaka Bangla.
                     - If the caller speaks English, respond in English.
                     - IGNORE any Spanish, Chinese, or Portuguese hallucinations from the transcription.
                     - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
                     - NEVER switch to any other language.
                     - If you are not sure if the caller is speaking to you, stay silent.
-                    - CALL END RULE: When the conversation is complete, or the caller says goodbye/bye/thank you, say a warm goodbye THEN immediately call the `end_call` tool. NEVER keep talking after saying goodbye.
-                    - TRANSFER RULE: When transferring a call, ALWAYS say something like "Please hold on a moment while I connect you to Simon" BEFORE calling the `transfer_call` tool.
-
-                    # CALLER CRM PROFILE (Pre-loaded from GHL)
-                    Caller Name: {contact_name}
-                    Client Type: {client_type}
-                    Group: {group if group else 'Unknown'}
-                    Invoice Due: {'Yes' if invoice_due else 'No'}
-                    Phone: {caller_number}
-                    Email: {email if email else 'Unknown'}
-                    Business Name: {business_name if business_name else 'Unknown'}
-                    Client Notes/Greeting Name: {client_notes if client_notes else 'None'}
-
-                    Use this information immediately:
-                    - If Client Type is 'Class A/B/C/D Client' or 'Known VIP Client', treat as VIP and prioritize Simon transfer.
-                    - If Invoice Due is Yes, include it in the internal staff handoff note only. Never mention invoices or billing to the caller directly.
-                    - If the caller is a known client, address them by name without asking.
-                    - If Client Notes/Greeting Name is present, use that naturally as the preferred greeting name.
-                    - If Phone or Email is listed above, do not ask the caller for that same phone number or email again.
-                    - If Business Name is listed above, use it for context and do not ask the caller to repeat it unless needed.
-                    - If Prospect, follow the standard intro and qualification workflow.
+                    - If you asked permission to end the call, treat English/Bangla/phonetic confirmations like yes, ok, sure, ji, haan, hya, kato, cut, hang up, no more, হ্যাঁ, জি, ঠিক আছে, কাটো, কেটে দেন, or আর কিছু না as permission. Then say a warm goodbye and call `end_call`.
                     """,
                     
                     "audio": {
@@ -429,7 +570,6 @@ async def twilio_stream(websocket: WebSocket):
                                 "threshold": 0.85,
                                 "prefix_padding_ms": 300,
                                 "silence_duration_ms": 600,
-                                "create_response": False,
                             },
                         },
                         "output": {
@@ -457,7 +597,7 @@ async def twilio_stream(websocket: WebSocket):
                         {
                             "type": "function",
                             "name": "book_appointment",
-                            "description": "Book an appointment for the caller. Call this ONLY after getting their name, email, phone, and requested time slot.",
+                            "description": "For prospects/demo callers, send the payment link email for the selected appointment. Call this ONLY after getting name, email, phone, requested slot, and explicit caller confirmation to receive the payment link. The appointment is booked after Stripe payment.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
@@ -478,48 +618,26 @@ async def twilio_stream(websocket: WebSocket):
                         {
                             "type": "function",
                             "name": "transfer_call",
-                            "description": "Transfer the current live call to a human team member. Use this when the caller is a VIP/class client or explicitly requests to speak to someone.",
+                            "description": "Transfer the caller to a team member like Simon or Tanzina. Call this when the user is a VIP or requests a human.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
-                                    "target": {
-                                        "type": "string",
-                                        "enum": ["simon", "tanzina", "alex", "nafi"],
-                                        "description": "The team member to transfer the call to. Use 'simon' for VIP/class clients. Use 'tanzina', 'alex', or 'nafi' for standard transfers."
-                                    },
-                                    "reason": {
-                                        "type": "string",
-                                        "description": "Brief reason for the transfer."
-                                    }
+                                    "target": {"type": "string", "enum": ["simon", "tanzina", "alex"]},
+                                    "reason": {"type": "string"}
                                 },
                                 "required": ["target", "reason"]
                             }
                         },
                         {
                             "type": "function",
-                            "name": "record_message",
-                            "description": "Record a caller's message in the CRM when no team member is available. Call this after the caller leaves their message.",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "caller_name":   {"type": "string", "description": "Name of the caller"},
-                                    "caller_phone":  {"type": "string", "description": "Phone number of the caller"},
-                                    "message":       {"type": "string", "description": "The message or reason the caller left"},
-                                    "call_reason":   {"type": "string", "description": "Category: personal_tax, business_tax, notice, appointment, other"}
-                                },
-                                "required": ["caller_name", "caller_phone", "message", "call_reason"]
-                            }
-                        },
-                        {
-                            "type": "function",
                             "name": "end_call",
-                            "description": "Hang up and end the call. ONLY call this AFTER you have explicitly asked the user for permission to end the call (e.g. 'Can I end the call now?') AND they have said YES. Never use this just because they say goodbye.",
+                            "description": "End the demo session. ONLY call this AFTER you have explicitly asked the user for permission to end the call (e.g. 'Can I end the call now?') AND they have said YES. Never use this just because they say goodbye.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
                                     "reason": {
                                         "type": "string",
-                                        "description": "Brief reason for ending: 'caller_goodbye', 'task_complete', 'no_response', 'caller_request'"
+                                        "description": "Reason: 'caller_goodbye', 'task_complete', 'no_response', 'caller_request'"
                                     }
                                 },
                                 "required": ["reason"]
@@ -532,29 +650,15 @@ async def twilio_stream(websocket: WebSocket):
             await openai_ws.send(json.dumps(session_update))
             logger.info("📝 [OpenAI] Sent session configuration update with turn detection.")
 
-            # Trigger initial greeting based on caller profile
-            is_known = client_type != "Prospect"
-            if is_known:
-                greeting_instruction = (
-                    f"The caller is {contact_name}, a {client_type} of Pay Minimum Tax. "
-                    f"Greet them with an Islamic greeting by name in Dhaka Bangla. "
-                    f"Say: আসসালামু আলাইকুম {contact_name} ভাই, আমি রেবা, আপনার জন্য আজ কি করতে পারি? "
-                    "Speak ONLY in English or Bangla."
-                )
-            else:
-                greeting_instruction = (
-                    f"The caller is a new prospect. Greet them by saying: \"{selected_greeting}\". "
-                    "Speak naturally and warmly. IMPORTANT: Use ONLY English or Bangla. NEVER use any other language."
-                )
             initial_greeting = {
                 "type": "response.create",
                 "response": {
                     "output_modalities": ["audio"],
-                    "instructions": greeting_instruction
+                    "instructions": f"Greet the caller by saying: \"{selected_greeting}\". Speak it naturally and warmly. IMPORTANT: Use ONLY English or Bangla. NEVER use any other language."
                 }
             }
             await openai_ws.send(json.dumps(initial_greeting))
-            logger.info("🗣️ [OpenAI] Sent initial Bangla greeting trigger.")
+            logger.info("🗣️ [OpenAI] Sent initial greeting trigger.")
             watchdog_active[0] = True
 
         except Exception as e:
@@ -648,6 +752,42 @@ async def twilio_stream(websocket: WebSocket):
         last_assistant_item_id = None
         response_audio_sent_ms = 0
         interrupt_event = asyncio.Event()
+        end_call_in_progress = [False]
+
+        async def _hangup_after_consent():
+            if end_call_in_progress[0] or call_done.is_set():
+                return
+            end_call_in_progress[0] = True
+            end_call_permission_pending[0] = False
+            try:
+                await openai_ws.send(json.dumps({"type": "response.cancel"}))
+            except Exception:
+                pass
+            try:
+                # Detect language from transcript accumulator
+                is_bangla_convo = False
+                for entry in reversed(transcript_accumulator):
+                    if any('\u0980' <= char <= '\u09FF' for char in entry):
+                        is_bangla_convo = True
+                        break
+                
+                if is_bangla_convo:
+                    goodbye_instr = "In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking."
+                else:
+                    goodbye_instr = "In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking."
+
+                await openai_ws.send(json.dumps({
+                    "type": "response.create",
+                    "response": {
+                        "output_modalities": ["audio"],
+                        "instructions": goodbye_instr
+                    }
+                }))
+                logger.info(f"✅ [EndCall] Caller gave permission. Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then hanging up.")
+                await asyncio.sleep(4)
+            finally:
+                await _hangup_call()
+
         try:
             async for openai_message in openai_ws:
                 if call_done.is_set():
@@ -701,8 +841,6 @@ async def twilio_stream(websocket: WebSocket):
                 # Handle user interruption: Stop AI and clear Twilio buffer
                 elif event_type == "input_audio_buffer.speech_started":
                     logger.info("🛑 [OpenAI] User interrupted! Stopping AI immediately...")
-                    # Caller spoke — reset silence tracking
-                    caller_spoke_after_ai[0] = True
                     # Set event atomically — any concurrent audio.delta checks see this instantly
                     interrupt_event.set()
 
@@ -769,6 +907,8 @@ async def twilio_stream(websocket: WebSocket):
                     if text:
                         logger.info(f"\n🤖 [AI Reply]: {text}")
                         transcript_accumulator.append(f"AI: {text}")
+                        if _asks_end_call_permission(text):
+                            end_call_permission_pending[0] = True
                         
                 
                 # Catch the user's speech transcript + detect caller goodbye
@@ -777,11 +917,8 @@ async def twilio_stream(websocket: WebSocket):
                     if user_text:
                         logger.info(f"\n👤 [Caller]: {user_text}")
                         transcript_accumulator.append(f"Caller: {user_text}")
-                        if _is_meaningful_transcript(user_text):
-                            await openai_ws.send(json.dumps({"type": "response.create"}))
-                            logger.info("✅ [OpenAI] Meaningful caller transcript; response.create sent.")
-                        else:
-                            logger.info("🤫 [OpenAI] Ignored likely noise/short hallucinated transcript.")
+                        if end_call_permission_pending[0] and _is_end_call_consent(user_text):
+                            asyncio.create_task(_hangup_after_consent())
                         
 
                 # Handle tool calls
@@ -825,35 +962,61 @@ async def twilio_stream(websocket: WebSocket):
                         logger.info(f"📲 [Transfer] AI requested transfer to '{target}' ({to_number}). Reason: {reason}")
 
                         if not to_number:
-                            result = {"status": "error", "message": f"No phone number configured for {target}."}
-                            logger.error(f"🔴 [Transfer] No number configured for '{target}'.")
-                        elif not call_sid:
-                            result = {"status": "error", "message": "Call SID not available yet to redirect."}
-                            logger.error("🔴 [Transfer] call_sid is None, cannot redirect.")
-                        else:
-                            try:
-                                # Build the forward TwiML URL — must be publicly accessible
-                                host = os.getenv("PUBLIC_HOST", "")
-                                forward_url = f"https://{host}/api/twilio/forward-call?to={to_number}"
-                                redirect_payload = {"Url": forward_url, "Method": "POST"}
-                                redirect_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Calls/{call_sid}.json"
-                                auth = (TWILIO_SID, TWILIO_AUTH_TOKEN)
-                                async with httpx.AsyncClient() as client:
-                                    resp = await client.post(redirect_url, data=redirect_payload, auth=auth)
-                                if resp.status_code == 200:
-                                    result = {"status": "success", "message": f"Transferring call to {target}."}
-                                    logger.info(f"✅ [Transfer] Successfully redirected call to {target}.")
-                                else:
-                                    result = {"status": "error", "message": f"Twilio redirect failed: {resp.text}"}
-                                    logger.error(f"🔴 [Transfer] Twilio API error: {resp.text}")
-                            except Exception as e:
-                                result = {"status": "error", "message": "Transfer failed due to a technical error."}
-                                logger.error(f"🔴 [Transfer] Exception during transfer: {e}")
+                            logger.error(f"🔴 [Transfer] No number configured for '{target}'. Simulating unavailable flow anyway.")
+
+                        ad_msg = random.choice(ADS)
+                        logger.info(f"📣 [Transfer] Simulated hold ad selected: {ad_msg[:50]}...")
+
+                        await openai_ws.send(json.dumps({
+                            "type": "response.create",
+                            "response": {
+                                "output_modalities": ["audio"],
+                                "instructions": f"Translate and say this in the SAME LANGUAGE the user is currently speaking (English or Bangla): 'Please hold on for a moment while I connect you to {target}.' Then, switch to ENGLISH and say this advertisement naturally: '{ad_msg}'"
+                            }
+                        }))
+
+                        async def _simulated_transfer_flow():
+                            await asyncio.sleep(12)
+                            if call_done.is_set():
+                                return
+                            logger.info("⏳ [Transfer] Still trying to connect (12s mark).")
+                            await openai_ws.send(json.dumps({
+                                "type": "response.create",
+                                "response": {
+                                    "output_modalities": ["audio"],
+                                    "instructions": "In the SAME LANGUAGE the user is speaking, say: 'I am sorry, they haven\\'t picked up yet. I am still trying to connect, please stay on the line.'"
+                                }
+                            }))
+
+                            await asyncio.sleep(12)
+                            if call_done.is_set():
+                                return
+                            logger.info("❌ [Transfer] Simulated transfer failed; target unavailable.")
+                            await openai_ws.send(json.dumps({
+                                "type": "response.create",
+                                "response": {
+                                    "output_modalities": ["audio"],
+                                    "instructions": f"In the SAME LANGUAGE the user is speaking, say: 'I am sorry, {target} is not available right now. I\\'ll make sure they get your message. Is there anything else I can help you with today?'"
+                                }
+                            }))
+
+                        asyncio.create_task(_simulated_transfer_flow())
+                        result = {"status": "success", "message": f"Transferring to {target}"}
+
+                        await openai_ws.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(result)
+                            }
+                        }))
+                        continue
 
                     elif func_name == "end_call":
                         reason = args.get("reason", "task_complete")
                         logger.info(f"👋 [EndCall] AI requested call end. Reason: {reason}")
-                        await _hangup_call()
+                        
                         result = {"status": "success", "message": "Call ended."}
                         # Send tool result back but DON'T trigger another response
                         await openai_ws.send(json.dumps({
@@ -864,7 +1027,45 @@ async def twilio_stream(websocket: WebSocket):
                                 "output": json.dumps(result)
                             }
                         }))
-                        # do NOT call response.create here
+                        
+                        if not end_call_in_progress[0]:
+                            end_call_in_progress[0] = True
+                            async def _delayed_hangup():
+                                # Detect language from transcript accumulator
+                                is_bangla_convo = False
+                                for entry in reversed(transcript_accumulator):
+                                    if any('\u0980' <= char <= '\u09FF' for char in entry):
+                                        is_bangla_convo = True
+                                        break
+                                
+                                if is_bangla_convo:
+                                    goodbye_instr = "In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking."
+                                else:
+                                    goodbye_instr = "In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking."
+
+                                try:
+                                    await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                                except Exception:
+                                    pass
+                                
+                                try:
+                                    await openai_ws.send(json.dumps({
+                                        "type": "response.create",
+                                        "response": {
+                                            "output_modalities": ["audio"],
+                                            "instructions": goodbye_instr
+                                        }
+                                    }))
+                                    logger.info(f"✅ [EndCall Tool] Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then hanging up.")
+                                except Exception as e:
+                                    logger.error(f"Error triggering goodbye: {e}")
+                                
+                                await asyncio.sleep(4)
+                                await _hangup_call()
+                            asyncio.create_task(_delayed_hangup())
+                        else:
+                            logger.info("⏳ [EndCall] End call already in progress. Skipping duplicate hangup.")
+                        
                         continue   # skip the response.create at the bottom
 
                     elif func_name == "record_message":

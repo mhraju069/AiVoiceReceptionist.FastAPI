@@ -18,7 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from services.openai_realtime import get_openai_realtime_model, get_openai_realtime_ws_url
 from services.prompts import system_prompt
-from routers.twilio import ADS
+from routers.twilio import ADS, _asks_end_call_permission, _is_end_call_consent
 router = APIRouter(
     prefix="/api/demo",
     tags=["Demo & Debug"]
@@ -84,6 +84,7 @@ async def demo_voice_stream(websocket: WebSocket):
     last_ai_response_done_at: list = [None]   # use list so inner funcs can mutate
     caller_spoke_after_ai: list = [False]       # reset when AI responds, set when caller speaks
     watchdog_active: list = [False]             # becomes True after first greeting is done
+    end_call_permission_pending: list = [False]
 
     async def _send(msg: dict):
         """Helper to safely send JSON to browser."""
@@ -130,6 +131,7 @@ async def demo_voice_stream(websocket: WebSocket):
                         - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
                         - NEVER switch to any other language.
                         - If you are not sure if the caller is speaking to you, stay silent.
+                        - If you asked permission to end the call, treat English/Bangla/phonetic confirmations like yes, ok, sure, ji, haan, hya, kato, cut, hang up, no more, হ্যাঁ, জি, ঠিক আছে, কাটো, কেটে দেন, or আর কিছু না as permission. Then say a warm goodbye and call `end_call`.
                         """,
                         # + """
 
@@ -178,7 +180,7 @@ async def demo_voice_stream(websocket: WebSocket):
                             {
                                 "type": "function",
                                 "name": "book_appointment",
-                                "description": "Book an appointment for the caller. Call this ONLY after getting their name, email, phone, and requested time slot.",
+                                "description": "For prospects/demo callers, send the payment link email for the selected appointment. Call this ONLY after getting name, email, phone, requested slot, and explicit caller confirmation to receive the payment link. The appointment is booked after Stripe payment.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
@@ -315,6 +317,42 @@ async def demo_voice_stream(websocket: WebSocket):
             interrupt_event = asyncio.Event()
             last_assistant_item_id = None
             response_audio_sent_ms = 0
+            end_call_in_progress = [False]
+
+            async def _end_demo_after_consent():
+                if end_call_in_progress[0] or call_done.is_set():
+                    return
+                end_call_in_progress[0] = True
+                end_call_permission_pending[0] = False
+                try:
+                    await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                except Exception:
+                    pass
+                try:
+                    # Detect language from transcript accumulator
+                    is_bangla_convo = False
+                    for entry in reversed(ai_transcripts + user_transcripts):
+                        if any('\u0980' <= char <= '\u09FF' for char in entry):
+                            is_bangla_convo = True
+                            break
+                    
+                    if is_bangla_convo:
+                        goodbye_instr = "In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking."
+                    else:
+                        goodbye_instr = "In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking."
+
+                    await openai_ws.send(json.dumps({
+                        "type": "response.create",
+                        "response": {
+                            "output_modalities": ["audio"],
+                            "instructions": goodbye_instr
+                        }
+                    }))
+                    await _debug("end_call_consent", f"✅ Caller gave end-call permission. Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then ending.")
+                    await asyncio.sleep(4)
+                finally:
+                    await _end_demo_call()
+
             try:
                 async for openai_message in openai_ws:
                     if call_done.is_set():
@@ -352,6 +390,8 @@ async def demo_voice_stream(websocket: WebSocket):
                         text = openai_data.get("text") or openai_data.get("transcript")
                         if text:
                             ai_transcripts.append(text)
+                            if _asks_end_call_permission(text):
+                                end_call_permission_pending[0] = True
                             await _debug("ai_transcript", f"🤖 AI: {text}")
                             await _send({"type": "transcript", "role": "assistant", "text": text})
                             
@@ -362,6 +402,8 @@ async def demo_voice_stream(websocket: WebSocket):
                             user_transcripts.append(user_text)
                             await _debug("user_transcript", f"👤 User: {user_text}")
                             await _send({"type": "transcript", "role": "user", "text": user_text})
+                            if end_call_permission_pending[0] and _is_end_call_consent(user_text):
+                                asyncio.create_task(_end_demo_after_consent())
                             
 
                     elif evt == "input_audio_buffer.speech_started":
@@ -430,7 +472,7 @@ async def demo_voice_stream(websocket: WebSocket):
                                 "type": "response.create",
                                 "response": {
                                     "output_modalities": ["audio"],
-                                    "instructions": f"Translate and say this in the SAME LANGUAGE the user is currently speaking (English or Bangla): 'Please hold on for a moment while I connect you to {target}.' Then, switch to ENGLISH and say this advertisement naturally: '{ad_msg}'. Then switch back to the user's language and say: 'I am still trying to connect you, please wait.'"
+                                    "instructions": f"Translate and say this in the SAME LANGUAGE the user is currently speaking (English or Bangla): 'Please hold on for a moment while I connect you to {target}.' Then, switch to ENGLISH and say this advertisement naturally: '{ad_msg}'"
                                 }
                             }))
 
@@ -509,7 +551,44 @@ async def demo_voice_stream(websocket: WebSocket):
                                     "output": json.dumps({"status": "success", "message": "Call ended."})
                                 }
                             }))
-                            await _end_demo_call()
+                            
+                            if not end_call_in_progress[0]:
+                                end_call_in_progress[0] = True
+                                async def _delayed_demo_hangup():
+                                    # Detect language from transcript accumulator
+                                    is_bangla_convo = False
+                                    for entry in reversed(ai_transcripts + user_transcripts):
+                                        if any('\u0980' <= char <= '\u09FF' for char in entry):
+                                            is_bangla_convo = True
+                                            break
+                                    
+                                    if is_bangla_convo:
+                                        goodbye_instr = "In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking."
+                                    else:
+                                        goodbye_instr = "In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking."
+
+                                    try:
+                                        await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                                    except Exception:
+                                        pass
+                                    
+                                    try:
+                                        await openai_ws.send(json.dumps({
+                                            "type": "response.create",
+                                            "response": {
+                                                "output_modalities": ["audio"],
+                                                "instructions": goodbye_instr
+                                            }
+                                        }))
+                                        await _debug("end_call_consent", f"✅ Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then ending.")
+                                    except Exception as e:
+                                        await _debug("end_call_error", f"Error triggering goodbye: {e}")
+                                    
+                                    await asyncio.sleep(4)
+                                    await _end_demo_call()
+                                asyncio.create_task(_delayed_demo_hangup())
+                            else:
+                                await _debug("end_call_duplicate", "⏳ End call already in progress. Skipping duplicate.")
                             continue  # skip response.create
 
                         # Send output back to OpenAI for ANY tool call
