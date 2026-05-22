@@ -15,6 +15,8 @@ from routers.common_tools import (
     handle_get_slots,
     handle_transfer_call,
     handle_end_call,
+    handle_send_link_sms,
+    handle_record_message,
 )
 
 router = APIRouter(
@@ -644,6 +646,41 @@ async def twilio_stream(websocket: WebSocket):
                                 },
                                 "required": ["reason"]
                             }
+                        },
+                        {
+                            "type": "function",
+                            "name": "record_message",
+                            "description": "Record a callback request or message for a team member in the CRM. Call this when the client wants Simon or another team member to call them back, or wants to leave a message.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "caller_name": {"type": "string", "description": "The name of the caller"},
+                                    "caller_phone": {"type": "string", "description": "The callback phone number"},
+                                    "message": {"type": "string", "description": "The message details or why they want a callback"},
+                                    "call_reason": {"type": "string", "description": "The reason for the call (e.g. tax, notice, callback)"}
+                                },
+                                "required": ["caller_name", "caller_phone", "message"]
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "send_link_sms",
+                            "description": "Send a portal sign up, login, or direct document notice upload link via SMS text message to the caller. Call this when the user agrees to receive a link via text/SMS.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "link_type": {
+                                        "type": "string",
+                                        "enum": ["signup", "login", "upload"],
+                                        "description": "The type of link to send: 'signup' for portal.payminimumtax.com/signup, 'login' for portal.payminimumtax.com/login, 'upload' for www.PayMinimumTax.com/upload"
+                                    },
+                                    "phone_number": {
+                                        "type": "string",
+                                        "description": "Optional destination phone number. Defaults to the caller's phone."
+                                    }
+                                },
+                                "required": ["link_type"]
+                            }
                         }
                     ],
                     "tool_choice": "auto"
@@ -919,7 +956,9 @@ async def twilio_stream(websocket: WebSocket):
                     if user_text:
                         logger.info(f"\n👤 [Caller]: {user_text}")
                         transcript_accumulator.append(f"Caller: {user_text}")
-                        if end_call_permission_pending[0] and _is_end_call_consent(user_text):
+                        is_consent = end_call_permission_pending[0] and _is_end_call_consent(user_text)
+                        is_explicit = any(cue in user_text.lower() for cue in ["kete dao", "kete den", "kete din", "cut kore den", "kat kore den", "কেটে দাও", "কেটে দেন", "কেটে দিন", "কল কেটে", "কলটা কেটে", "cut the call", "hang up", "allah hafez", "khoda hafez", "রাখলাম", "রাখছি", "rakhlam", "rakhchi", "bye bye", "allah hafiz"])
+                        if is_consent or is_explicit:
                             asyncio.create_task(_hangup_after_consent())
                         
 
@@ -965,25 +1004,20 @@ async def twilio_stream(websocket: WebSocket):
                         continue
 
                     elif func_name == "record_message":
-                        caller_name_arg  = args.get("caller_name", contact_name)
-                        caller_phone_arg = args.get("caller_phone", caller_number)
-                        message_text     = args.get("message", "")
-                        call_reason_arg  = args.get("call_reason", "other")
-                        logger.info(f"📝 [CRM] Recording message from {caller_name_arg}: {message_text}")
-                        note = (
-                            f"📞 Missed Call Note\n"
-                            f"Name: {caller_name_arg}\n"
-                            f"Phone: {caller_phone_arg}\n"
-                            f"Reason: {call_reason_arg}\n"
-                            f"Message: {message_text}"
+                        result = await handle_record_message(
+                            args,
+                            contact_id,
+                            contact_name,
+                            caller_number,
+                            _log_adapter
                         )
-                        from services.ghl import add_crm_note
-                        saved = await add_crm_note(contact_id, note)
-                        if saved:
-                            result = {"status": "success", "message": "Message recorded in CRM."}
-                        else:
-                            logger.info(f"📝 [CRM] No contact ID, logging locally: {note}")
-                            result = {"status": "success", "message": "Message noted. Team will follow up."}
+
+                    elif func_name == "send_link_sms":
+                        result = await handle_send_link_sms(
+                            args,
+                            caller_number,
+                            _log_adapter
+                        )
 
                     # Send output back to OpenAI
 

@@ -157,6 +157,10 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
         <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
         <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
       </div>
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; max-width: 280px; margin-bottom: 10px;">
+        <label for="demoPhone" style="font-size: 0.75rem; color: var(--text2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Your Phone Number (SMS Testing)</label>
+        <input id="demoPhone" type="text" placeholder="+1234567890" style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; width: 100%; text-align: center; outline: none; transition: border-color 0.2s;" value="+1">
+      </div>
       <button id="callBtn" class="call-btn start" onclick="toggleCall()"><i class="fas fa-phone"></i></button>
       <div id="transcriptArea" class="transcript-area" style="display:none"></div>
     </div>
@@ -242,8 +246,9 @@ async function startCall() {
 
   // Connect WebSocket
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const wsUrl = `${proto}://${location.host}/api/demo/voice-stream`;
-  log(`🔌 Connecting to ${wsUrl}`, 'info');
+  const demoPhone = encodeURIComponent(document.getElementById('demoPhone').value.trim() || '+1234567890');
+  const wsUrl = `${proto}://${location.host}/api/demo/voice-stream?phone=${demoPhone}`;
+  log(`🔌 Connecting to voice-stream...`, 'info');
   
   try {
     ws = new WebSocket(wsUrl);

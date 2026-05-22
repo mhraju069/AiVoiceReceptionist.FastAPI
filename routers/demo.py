@@ -24,6 +24,8 @@ from routers.common_tools import (
     handle_get_slots,
     handle_transfer_call,
     handle_end_call,
+    handle_send_link_sms,
+    handle_record_message,
 )
 router = APIRouter(
     prefix="/api/demo",
@@ -77,7 +79,8 @@ async def demo_voice_stream(websocket: WebSocket):
     Browser-compatible WebSocket for voice streaming.
     """
     await websocket.accept()
-    print("\n🔌 [Demo] Browser WebSocket connected.")
+    phone = websocket.query_params.get("phone", "+1234567890")
+    print(f"\n🔌 [Demo] Browser WebSocket connected. Phone: {phone}")
 
     # Use an event to signal when the call ends (keeps both tasks alive)
     call_done = asyncio.Event()
@@ -230,6 +233,41 @@ async def demo_voice_stream(websocket: WebSocket):
                                         }
                                     },
                                     "required": ["reason"]
+                                }
+                            },
+                            {
+                                "type": "function",
+                                "name": "record_message",
+                                "description": "Record a callback request or message for a team member in the CRM. Call this when the client wants Simon or another team member to call them back, or wants to leave a message.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "caller_name": {"type": "string", "description": "The name of the caller"},
+                                        "caller_phone": {"type": "string", "description": "The callback phone number"},
+                                        "message": {"type": "string", "description": "The message details or why they want a callback"},
+                                        "call_reason": {"type": "string", "description": "The reason for the call (e.g. tax, notice, callback)"}
+                                    },
+                                    "required": ["caller_name", "caller_phone", "message"]
+                                }
+                            },
+                            {
+                                "type": "function",
+                                "name": "send_link_sms",
+                                "description": "Send a portal sign up, login, or direct document notice upload link via SMS text message to the caller. Call this when the user agrees to receive a link via text/SMS.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "link_type": {
+                                            "type": "string",
+                                            "enum": ["signup", "login", "upload"],
+                                            "description": "The type of link to send: 'signup' for portal.payminimumtax.com/signup, 'login' for portal.payminimumtax.com/login, 'upload' for www.PayMinimumTax.com/upload"
+                                         },
+                                         "phone_number": {
+                                             "type": "string",
+                                             "description": "Optional destination phone number. Defaults to the caller's phone."
+                                         }
+                                    },
+                                    "required": ["link_type"]
                                 }
                             }
                         ],
@@ -408,7 +446,9 @@ async def demo_voice_stream(websocket: WebSocket):
                             user_transcripts.append(user_text)
                             await _debug("user_transcript", f"👤 User: {user_text}")
                             await _send({"type": "transcript", "role": "user", "text": user_text})
-                            if end_call_permission_pending[0] and _is_end_call_consent(user_text):
+                            is_consent = end_call_permission_pending[0] and _is_end_call_consent(user_text)
+                            is_explicit = any(cue in user_text.lower() for cue in ["kete dao", "kete den", "kete din", "cut kore den", "kat kore den", "কেটে দাও", "কেটে দেন", "কেটে দিন", "কল কেটে", "কলটা কেটে", "cut the call", "hang up", "allah hafez", "khoda hafez", "রাখলাম", "রাখছি", "rakhlam", "rakhchi", "bye bye", "allah hafiz"])
+                            if is_consent or is_explicit:
                                 asyncio.create_task(_end_demo_after_consent())
                             
 
@@ -500,6 +540,22 @@ async def demo_voice_stream(websocket: WebSocket):
                                 _end_demo_call
                             )
                             continue
+
+                        elif func_name == "record_message":
+                            result = await handle_record_message(
+                                args=args,
+                                contact_id="",
+                                default_name="Demo Caller",
+                                default_phone=phone,
+                                logger_or_debug=_log_adapter
+                            )
+
+                        elif func_name == "send_link_sms":
+                            result = await handle_send_link_sms(
+                                args=args,
+                                default_phone=phone,
+                                logger_or_debug=_log_adapter
+                            )
 
                         # Send output back to OpenAI for ANY tool call
                         await openai_ws.send(json.dumps({
