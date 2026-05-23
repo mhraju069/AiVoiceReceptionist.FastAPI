@@ -74,10 +74,11 @@ async def get_contact(contact_id: str):
 
 async def get_contact_by_phone(phone: str):
     """Search for a contact by phone number in GHL. Returns raw contact dict."""
-    url = f"{GHL_BASE_URL}/contacts/lookup?phone={phone}"
+    url = f"{GHL_BASE_URL}/contacts/lookup"
+    params = {"phone": phone}
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, headers=get_ghl_headers())
+            response = await client.get(url, headers=get_ghl_headers(), params=params)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("contact"):
@@ -92,7 +93,23 @@ async def get_contact_profile_by_phone(phone: str) -> dict:
     Returns a structured profile for the AI: name, group (A/B/C/D), 
     client type, and invoice status from GHL tags.
     """
-    contact = await get_contact_by_phone(phone)
+    from services.known_clients import normalize_phone
+    normalized = normalize_phone(phone)
+    search_phone = phone
+    if normalized:
+        if len(normalized) == 11 and normalized.startswith("1"):
+            search_phone = f"+{normalized}"
+        elif len(normalized) == 10:
+            search_phone = f"+1{normalized}"
+
+    contact = await get_contact_by_phone(search_phone)
+    if not contact and normalized:
+        # Fallback 1: Try searching with 11-digit format without +
+        contact = await get_contact_by_phone(normalized)
+        if not contact and len(normalized) == 11 and normalized.startswith("1"):
+            # Fallback 2: Try searching with 10-digit format
+            contact = await get_contact_by_phone(normalized[1:])
+
     if not contact:
         return {"found": False, "client_type": "Prospect", "group": None, "name": None}
 
@@ -349,7 +366,9 @@ async def get_contacts(query: Optional[str] = None, limit: int = 20):
         params["query"] = query
         
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, params=params, headers=get_ghl_headers())
+        # Avoid trailing slash issues
+        clean_url = url.rstrip('/')
+        response = await client.get(clean_url, params=params, headers=get_ghl_headers())
         
         if response.status_code == 200:
             data = response.json().get("contacts", [])
@@ -360,3 +379,103 @@ async def get_contacts(query: Optional[str] = None, limit: int = 20):
             return data
         else:
             raise HTTPException(status_code=response.status_code, detail=response.text)
+
+
+async def send_sms_via_ghl(to_phone: str, message: str) -> bool:
+    """
+    Sends an SMS message using GoHighLevel API (supporting both V1 and V2 endpoints).
+    If the contact doesn't exist, it first creates it.
+    """
+    import os
+    from services.known_clients import normalize_phone
+    from services.ghl_search import search_contact_by_phone_or_email
+    
+    normalized = normalize_phone(to_phone)
+    # Ensure it is in E.164 format starting with +
+    if not normalized.startswith("+"):
+        if len(normalized) == 10:
+            normalized = f"+1{normalized}"
+        elif len(normalized) == 11 and normalized.startswith("1"):
+            normalized = f"+{normalized}"
+        else:
+            normalized = f"+{normalized}"
+            
+    logger.info(f"📤 [GHL SMS] Starting SMS send to {normalized}...")
+    
+    contact_id = None
+    try:
+        # Search for existing contact in GHL
+        contact = await search_contact_by_phone_or_email(phone=normalized)
+        if contact:
+            contact_id = contact.get("id") or contact.get("contactId")
+            logger.info(f"✅ [GHL SMS] Found contact: {contact_id}")
+        else:
+            # Create a new contact
+            logger.info(f"🆕 [GHL SMS] Contact not found. Creating test contact in GHL...")
+            contact_resp = await add_contact(ContactCreate(
+                phone=normalized,
+                name="Prospect",
+                source="AI Call Text Request",
+                tags=["ai-text-request"]
+            ))
+            contact_obj = contact_resp.get("contact") or contact_resp
+            contact_id = contact_obj.get("id") or contact_obj.get("contactId")
+            logger.info(f"✅ [GHL SMS] Created contact: {contact_id}")
+    except Exception as e:
+        logger.error(f"❌ [GHL SMS] Error finding/creating contact: {e}")
+        
+    if not contact_id:
+        logger.error("❌ [GHL SMS] Could not get or create contact_id.")
+        return False
+
+    # Send message using GHL V1 or V2
+    headers = get_ghl_headers()
+    from_num = os.getenv("GHL_FROM_NUMBER", "+17814887674")
+    
+    if "rest.gohighlevel.com" in GHL_BASE_URL or "api.gohighlevel.com" in GHL_BASE_URL:
+        # GHL V1 endpoint
+        url = f"{GHL_BASE_URL}/contacts/{contact_id}/messages"
+        payload = {
+            "type": "SMS",
+            "message": message
+        }
+        if from_num:
+            payload["fromNumber"] = from_num
+            
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                # Remove trailing slash for stability
+                clean_url = url.rstrip('/')
+                resp = await client.post(clean_url, json=payload, headers=headers)
+                if resp.status_code in [200, 201]:
+                    logger.info(f"✅ [GHL SMS] V1 message sent to {normalized}")
+                    return True
+                else:
+                    logger.error(f"❌ [GHL SMS] V1 Send failed (status={resp.status_code}): {resp.text}")
+            except Exception as e:
+                logger.error(f"❌ [GHL SMS] V1 send exception: {e}")
+    else:
+        # GHL V2 endpoint
+        url = f"{GHL_BASE_URL}/conversations/messages"
+        headers["Version"] = "2021-07-28"
+        payload = {
+            "type": "SMS",
+            "contactId": contact_id,
+            "message": message
+        }
+        if from_num:
+            payload["fromNumber"] = from_num
+            
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                clean_url = url.rstrip('/')
+                resp = await client.post(clean_url, json=payload, headers=headers)
+                if resp.status_code in [200, 201]:
+                    logger.info(f"✅ [GHL SMS] V2 message sent to {normalized}")
+                    return True
+                else:
+                    logger.error(f"❌ [GHL SMS] V2 Send failed (status={resp.status_code}): {resp.text}")
+            except Exception as e:
+                logger.error(f"❌ [GHL SMS] V2 send exception: {e}")
+                
+    return False

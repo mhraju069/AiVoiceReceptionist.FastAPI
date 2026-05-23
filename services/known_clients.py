@@ -47,11 +47,21 @@ def upsert_known_client(client: dict) -> dict:
     if not normalized:
         raise ValueError("Phone number is required")
 
+    # Format the phone number properly to E.164 (e.g. +19089067284)
+    phone_raw = client.get("phone") or ""
+    digits = re.sub(r"\D", "", phone_raw)
+    if len(digits) == 10:
+        formatted_phone = f"+1{digits}"
+    elif len(digits) == 11 and digits.startswith("1"):
+        formatted_phone = f"+{digits}"
+    else:
+        formatted_phone = phone_raw  # fallback
+
     clean_client = {
         "plan": client.get("plan") or "None",
         "first_name": client.get("first_name") or "",
         "last_name": client.get("last_name") or "",
-        "phone": client.get("phone") or "",
+        "phone": formatted_phone,
         "email": client.get("email") or "",
         "business_name": client.get("business_name") or "",
         "notes": client.get("notes") or "",

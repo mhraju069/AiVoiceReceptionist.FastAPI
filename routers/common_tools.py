@@ -20,7 +20,44 @@ def is_office_open() -> bool:
     return OFFICE_OPEN <= now_et.time() < OFFICE_CLOSE
 
 async def send_sms(to_number: str, message_body: str, logger_or_debug=None) -> bool:
-    """Send an SMS using Twilio's REST API."""
+    """Send an SMS using GoHighLevel or Twilio REST API."""
+    sms_provider = os.getenv("SMS_PROVIDER", "ghl").lower()
+    
+    clean_to = to_number.strip()
+    if clean_to and not clean_to.startswith("+"):
+        if len(clean_to) == 10 and clean_to.isdigit():
+            clean_to = f"+1{clean_to}"
+        elif clean_to.startswith("1") and len(clean_to) == 11 and clean_to.isdigit():
+            clean_to = f"+{clean_to}"
+        else:
+            clean_to = f"+{clean_to}"
+
+    # Try sending via GHL if configured as provider
+    if sms_provider == "ghl":
+        from services.ghl import send_sms_via_ghl
+        try:
+            success = await send_sms_via_ghl(clean_to, message_body)
+            if success:
+                msg = f"✅ [SMS] Sent successfully via GHL to {clean_to}."
+                if logger_or_debug:
+                    await logger_or_debug("sms_success", msg)
+                else:
+                    print(msg)
+                return True
+            else:
+                msg = f"⚠️ [SMS] GHL SMS failed. Falling back to Twilio..."
+                if logger_or_debug:
+                    await logger_or_debug("sms_warn", msg)
+                else:
+                    print(msg)
+        except Exception as e:
+            msg = f"⚠️ [SMS] Exception in GHL SMS: {e}. Falling back to Twilio..."
+            if logger_or_debug:
+                await logger_or_debug("sms_warn", msg)
+            else:
+                print(msg)
+
+    # Twilio / Fallback Code
     twilio_sid = os.getenv("TWILIO_SID", "")
     twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
     twilio_number = os.getenv("TWILIO_NUMBER", "")
@@ -31,17 +68,8 @@ async def send_sms(to_number: str, message_body: str, logger_or_debug=None) -> b
             await logger_or_debug("sms_warn", msg)
         else:
             print(msg)
-        print(f"📱 [Simulated SMS] To: {to_number} | Body: {message_body}")
+        print(f"📱 [Simulated SMS] To: {clean_to} | Body: {message_body}")
         return True
-
-    clean_to = to_number.strip()
-    if clean_to and not clean_to.startswith("+"):
-        if len(clean_to) == 10 and clean_to.isdigit():
-            clean_to = f"+1{clean_to}"
-        elif clean_to.startswith("1") and len(clean_to) == 11 and clean_to.isdigit():
-            clean_to = f"+{clean_to}"
-        else:
-            clean_to = f"+{clean_to}"
 
     url = f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Messages.json"
     auth_header = base64.b64encode(f"{twilio_sid}:{twilio_token}".encode()).decode()
@@ -59,21 +87,21 @@ async def send_sms(to_number: str, message_body: str, logger_or_debug=None) -> b
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(url, headers=headers, data=data)
             if resp.status_code in (200, 201):
-                msg = f"✅ [SMS] Sent successfully to {clean_to}."
+                msg = f"✅ [SMS] Sent successfully via Twilio fallback to {clean_to}."
                 if logger_or_debug:
                     await logger_or_debug("sms_success", msg)
                 else:
                     print(msg)
                 return True
             else:
-                msg = f"❌ [SMS] Failed to send to {clean_to}: {resp.status_code} - {resp.text}"
+                msg = f"❌ [SMS] Failed to send to {clean_to} via Twilio fallback: {resp.status_code} - {resp.text}"
                 if logger_or_debug:
                     await logger_or_debug("sms_error", msg)
                 else:
                     print(msg)
                 return False
     except Exception as e:
-        msg = f"❌ [SMS] Exception sending to {clean_to}: {e}"
+        msg = f"❌ [SMS] Exception sending to {clean_to} via Twilio fallback: {e}"
         if logger_or_debug:
             await logger_or_debug("sms_exception", msg)
         else:

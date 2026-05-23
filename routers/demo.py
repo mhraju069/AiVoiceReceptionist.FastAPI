@@ -122,15 +122,54 @@ async def demo_voice_stream(websocket: WebSocket):
                 openai_ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
                 await _debug("openai_connected", "🟢 OpenAI Realtime API connected!")
 
+                # GHL profile lookup for Demo
+                from services.ghl import get_contact_profile_by_phone
+                from services.known_clients import find_known_client_by_phone, profile_from_known_client
+                
+                contact_name = "Prospect"
+                client_type = "Prospect"
+                group = ""
+                contact_id = ""
+                invoice_due = "false"
+                email = ""
+                business_name = ""
+                client_notes = ""
+                try:
+                    known_client = find_known_client_by_phone(phone)
+                    profile = profile_from_known_client(known_client) if known_client else await get_contact_profile_by_phone(phone)
+                    if profile.get("found"):
+                        contact_name = profile.get("name", "Client")
+                        client_type = profile.get("client_type", "Prospect")
+                        group = profile.get("group") or ""
+                        contact_id = profile.get("contact_id") or ""
+                        invoice_due = "true" if profile.get("invoice_due") else "false"
+                        email = profile.get("email") or ""
+                        business_name = profile.get("business_name") or ""
+                        client_notes = profile.get("notes") or ""
+                        source = profile.get("source") or "ghl"
+                        print(f"📌 [Demo Client:{source}] {phone} -> {contact_name} | {client_type}")
+                except Exception as e:
+                    print(f"Error fetching contact profile in demo: {e}")
+
                 instructions, selected_greeting = system_prompt()
                 
+                # Greet known client by notes if available, else by name
+                greeting_name = client_notes.strip() if (client_notes and client_notes.strip()) else contact_name
+                if greeting_name and greeting_name != "Prospect":
+                    if "Dhonnobad, Thank you for calling Pay Minimum Tax" in selected_greeting:
+                        selected_greeting = selected_greeting.replace("How can I help you?", f"Hello, {greeting_name}! How can I help you today?")
+                        selected_greeting = selected_greeting.replace("What could I do for you?", f"Hello, {greeting_name}! What can I do for you today?")
+                        selected_greeting = selected_greeting.replace("Who do I have the pleasure to speak with today?", f"Hello, {greeting_name}! How can I help you today?")
+                    else:
+                        selected_greeting = f"Dhonnobad, Thank you for calling Pay Minimum Tax, I am রেবা. Hello, {greeting_name}! How can I help you today?"
+
                 session_update = {
                     "type": "session.update",
                     "session": {
                         "type": "realtime",
                         "model": OPENAI_REALTIME_MODEL,
                         "output_modalities": ["audio"],
-                        "instructions": instructions + """
+                        "instructions": instructions + f"""
                         
                         # ADDITIONAL SESSION RULES
                         - You are BILINGUAL: English and Bangla ONLY.
@@ -141,18 +180,18 @@ async def demo_voice_stream(websocket: WebSocket):
                         - NEVER switch to any other language.
                         - If you are not sure if the caller is speaking to you, stay silent.
                         - If you asked permission to end the call, treat English/Bangla/phonetic confirmations like yes, ok, sure, ji, haan, hya, kato, cut, hang up, no more, হ্যাঁ, জি, ঠিক আছে, কাটো, কেটে দেন, or আর কিছু না as permission. Then say a warm goodbye and call `end_call`.
+                        
+                        # CALLER CRM PROFILE
+                        - Name: {contact_name}
+                        - Phone: {phone} (Note: Always confirm this number instead of asking for it. All clients are US-based with +1 prefix.)
+                        - Client Type: {client_type}
+                        - Group: {group}
+                        - Contact ID: {contact_id}
+                        - Email: {email if email else 'Not Provided'}
+                        - Business Name: {business_name if business_name else 'Not Provided'}
+                        - Client Notes from CRM: {client_notes if client_notes else 'None'}
+                        - Has Invoice Due: {invoice_due}
                         """,
-                        # + """
-
-                        # # CALLER CRM PROFILE (Simulated for Demo)
-                        # Caller Name: Test Simon (Demo User)
-                        # Client Type: Class A Client
-                        # Group: A
-                        # Invoice Due: No
-                        # Phone: +1234567890
-
-                        # Note: Since this is a Demo session, assume the user is this Class A Client. Greet them by name and handle as VIP.
-                        # """
                         "audio": {
                             "input": {
                                 "format": {"type": "audio/pcm", "rate": 24000},
@@ -372,18 +411,17 @@ async def demo_voice_stream(websocket: WebSocket):
                     await openai_ws.send(json.dumps({"type": "response.cancel"}))
                 except Exception:
                     pass
-                try:
-                    # Detect language from transcript accumulator
+                    # Detect language from user transcript accumulator only
                     is_bangla_convo = False
-                    for entry in reversed(ai_transcripts + user_transcripts):
+                    for entry in reversed(user_transcripts):
                         if any('\u0980' <= char <= '\u09FF' for char in entry):
                             is_bangla_convo = True
                             break
                     
                     if is_bangla_convo:
-                        goodbye_instr = "In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking."
+                        goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
                     else:
-                        goodbye_instr = "In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking."
+                        goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
 
                     await openai_ws.send(json.dumps({
                         "type": "response.create",

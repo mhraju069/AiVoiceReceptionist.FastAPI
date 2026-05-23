@@ -18,9 +18,12 @@ import re
 _insight_cache = {"timestamp": 0, "text": "Tax season is peaking — 67% of today's calls are tax-related. Consider promoting your express filing package."}
 
 def normalize_phone(phone: str) -> str:
-    """Strip all non-numeric characters from phone string."""
+    """Normalize phone number to digits, prepending 1 for 10-digit numbers."""
     if not phone: return ""
-    return re.sub(r'\D', '', str(phone))
+    digits = re.sub(r'\D', '', str(phone))
+    if len(digits) == 10:
+        return f"1{digits}"
+    return digits
 
 router = APIRouter(
     prefix="/api/dashboard",

@@ -94,6 +94,7 @@ def _admin_layout(title: str, body: str, current_user: Optional[User] = None) ->
       <a href="/admin/company">Company Data</a>
       <a href="/admin/prompts">Prompts</a>
       <a href="/admin/known-clients">Known Clients</a>
+      <a href="/admin/settings">Settings</a>
       <a href="/admin/users">Users</a>
       {auth_nav}
     </nav>
@@ -372,34 +373,48 @@ def admin_known_clients(current_user: User = Depends(get_admin_user)):
           <td>{_e(client.get('business_name'))}</td>
           <td>{_e(client.get('notes'))}</td>
           <td>
-            <form method="post" action="/admin/known-clients/delete" onsubmit="return confirm('Delete this client?')">
-              <input type="hidden" name="phone" value="{_e(client.get('phone'))}">
-              <button class="danger" type="submit">Delete</button>
-            </form>
+            <div class="actions">
+              <button type="button" class="button" onclick="editClient(this)"
+                data-plan="{_e(client.get('plan'))}"
+                data-first-name="{_e(client.get('first_name'))}"
+                data-last-name="{_e(client.get('last_name'))}"
+                data-phone="{_e(client.get('phone'))}"
+                data-email="{_e(client.get('email'))}"
+                data-business-name="{_e(client.get('business_name'))}"
+                data-notes="{_e(client.get('notes'))}">Edit</button>
+              <form method="post" action="/admin/known-clients/delete" onsubmit="return confirm('Delete this client?')" style="margin:0;">
+                <input type="hidden" name="phone" value="{_e(client.get('phone'))}">
+                <button class="danger" type="submit">Delete</button>
+              </form>
+            </div>
           </td>
         </tr>"""
         for client in clients
     )
     body = f"""
-    <section class="panel">
-      <h2>Add Or Update Known Client</h2>
+    <section class="panel" id="client-form-panel">
+      <h2 id="form-title">Add Or Update Known Client</h2>
       <form method="post" action="/admin/known-clients">
+        <input type="hidden" name="old_phone" id="form-old-phone" value="">
         <div class="grid">
           <label>Plan
-            <select name="plan">
+            <select name="plan" id="form-plan">
               <option>None</option><option>A</option><option>B</option><option>C</option><option>D</option>
             </select>
           </label>
-          <label>First Name<input name="first_name" required></label>
-          <label>Last Name<input name="last_name"></label>
-          <label>Phone<input name="phone" required></label>
-          <label>Email<input name="email" type="email"></label>
-          <label>Business Name<input name="business_name"></label>
+          <label>First Name<input name="first_name" id="form-first-name" required></label>
+          <label>Last Name<input name="last_name" id="form-last-name"></label>
+          <label>Phone<input name="phone" id="form-phone" required></label>
+          <label>Email<input name="email" id="form-email" type="email"></label>
+          <label>Business Name<input name="business_name" id="form-business-name"></label>
         </div>
         <br>
-        <label>Notes<textarea name="notes"></textarea></label>
+        <label>Notes<textarea name="notes" id="form-notes"></textarea></label>
         <br>
-        <button type="submit">Save Client</button>
+        <div style="display:flex; gap:8px;">
+          <button type="submit">Save Client</button>
+          <button type="button" id="cancel-edit-btn" class="button" style="display:none; background:#667085;" onclick="cancelEdit()">Cancel Edit</button>
+        </div>
       </form>
     </section>
     <section class="panel">
@@ -412,6 +427,46 @@ def admin_known_clients(current_user: User = Depends(get_admin_user)):
         <tbody>{rows or '<tr><td colspan="7" class="muted">No known clients yet.</td></tr>'}</tbody>
       </table>
     </section>
+    
+    <script>
+      function editClient(btn) {{
+        const plan = btn.getAttribute('data-plan');
+        const first_name = btn.getAttribute('data-first-name');
+        const last_name = btn.getAttribute('data-last-name');
+        const phone = btn.getAttribute('data-phone');
+        const email = btn.getAttribute('data-email');
+        const business_name = btn.getAttribute('data-business-name');
+        const notes = btn.getAttribute('data-notes');
+        
+        document.getElementById('form-plan').value = plan;
+        document.getElementById('form-first-name').value = first_name;
+        document.getElementById('form-last-name').value = last_name;
+        document.getElementById('form-phone').value = phone;
+        document.getElementById('form-email').value = email;
+        document.getElementById('form-business-name').value = business_name;
+        document.getElementById('form-notes').value = notes;
+        document.getElementById('form-old-phone').value = phone;
+        
+        document.getElementById('form-title').innerText = 'Edit Known Client: ' + first_name + ' ' + (last_name || '');
+        document.getElementById('cancel-edit-btn').style.display = 'inline-flex';
+        
+        document.getElementById('client-form-panel').scrollIntoView({{ behavior: 'smooth' }});
+      }}
+      
+      function cancelEdit() {{
+        document.getElementById('form-plan').value = 'None';
+        document.getElementById('form-first-name').value = '';
+        document.getElementById('form-last-name').value = '';
+        document.getElementById('form-phone').value = '';
+        document.getElementById('form-email').value = '';
+        document.getElementById('form-business-name').value = '';
+        document.getElementById('form-notes').value = '';
+        document.getElementById('form-old-phone').value = '';
+        
+        document.getElementById('form-title').innerText = 'Add Or Update Known Client';
+        document.getElementById('cancel-edit-btn').style.display = 'none';
+      }}
+    </script>
     """
     return _admin_layout("Known Clients", body, current_user)
 
@@ -425,8 +480,15 @@ def admin_save_known_client(
     email: str = Form(""),
     business_name: str = Form(""),
     notes: str = Form(""),
+    old_phone: str = Form(""),
     current_user: User = Depends(get_admin_user),
 ):
+    # If editing and the phone number has changed, delete the old client record first
+    if old_phone and old_phone.strip():
+        from services.known_clients import normalize_phone
+        if normalize_phone(old_phone) != normalize_phone(phone):
+            delete_known_client(old_phone)
+
     upsert_known_client({
         "plan": plan,
         "first_name": first_name,
@@ -446,3 +508,144 @@ def admin_delete_known_client(
 ):
     delete_known_client(phone)
     return RedirectResponse("/admin/known-clients", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.get("/settings", response_class=HTMLResponse, include_in_schema=False)
+def admin_settings(
+    saved: Optional[str] = None,
+    current_user: User = Depends(get_admin_user),
+):
+    import os
+    sms_provider = os.getenv("SMS_PROVIDER", "ghl")
+    ghl_from_number = os.getenv("GHL_FROM_NUMBER", "+17814887674")
+    ghl_base_url = os.getenv("GHL_BASE_URL", "https://rest.gohighlevel.com/v1")
+    ghl_api_key = os.getenv("GHL_API_KEY", "")
+    ghl_location_id = os.getenv("GHL_LOCATION_ID", "")
+    
+    saved_html = '<div class="panel" style="border-color:#99d6c9;color:#0f766e;">Settings saved successfully. Changes are applied immediately.</div>' if saved else ""
+    
+    body = f"""
+    {saved_html}
+    <section class="panel">
+      <h2>System & GHL Settings</h2>
+      <p class="muted">Manage your AI receptionist configuration, GoHighLevel tokens, and default SMS provider below.</p>
+      <form method="post" action="/admin/settings">
+        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));">
+          <label>SMS Provider
+            <select name="sms_provider">
+              <option value="ghl" {"selected" if sms_provider == "ghl" else ""}>GoHighLevel (GHL)</option>
+              <option value="twilio" {"selected" if sms_provider == "twilio" else ""}>Twilio</option>
+            </select>
+          </label>
+          <label>GHL From Phone Number (GHL Number)
+            <input name="ghl_from_number" value="{_e(ghl_from_number)}" placeholder="+17814887674" required>
+          </label>
+          <label>GHL Location ID
+            <input name="ghl_location_id" value="{_e(ghl_location_id)}" placeholder="Location ID" required>
+          </label>
+        </div>
+        <br>
+        <label>GHL Base URL
+          <input name="ghl_base_url" value="{_e(ghl_base_url)}" placeholder="https://services.leadconnectorhq.com" required>
+        </label>
+        <br>
+        <label>GHL API Key / Private Integration Token
+          <input name="ghl_api_key" type="password" value="{_e(ghl_api_key)}" placeholder="JWT / Token" required style="-webkit-text-security: disc;">
+        </label>
+        <br>
+        <button type="submit">Save Settings</button>
+      </form>
+    </section>
+    """
+    return _admin_layout("Settings", body, current_user)
+
+
+@router.post("/settings", include_in_schema=False)
+def admin_save_settings(
+    sms_provider: str = Form(...),
+    ghl_from_number: str = Form(...),
+    ghl_base_url: str = Form(...),
+    ghl_api_key: str = Form(...),
+    ghl_location_id: str = Form(...),
+    current_user: User = Depends(get_admin_user),
+):
+    import os
+    # 1. Save to .env on disk
+    updates = {
+        "SMS_PROVIDER": sms_provider.strip(),
+        "GHL_FROM_NUMBER": ghl_from_number.strip(),
+        "GHL_BASE_URL": ghl_base_url.strip(),
+        "GHL_API_KEY": ghl_api_key.strip(),
+        "GHL_LOCATION_ID": ghl_location_id.strip()
+    }
+    
+    env_path = "/app/.env"
+    if not os.path.exists(env_path):
+        env_path = ".env"
+        
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        lines = []
+
+    new_lines = []
+    keys_updated = set()
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key, val = stripped.split("=", 1)
+            key = key.strip()
+            if key in updates:
+                new_lines.append(f"{key}={updates[key]}\n")
+                keys_updated.add(key)
+                continue
+        new_lines.append(line)
+        
+    for key, value in updates.items():
+        if key not in keys_updated:
+            new_lines.append(f"{key}={value}\n")
+            
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
+    # 2. Update environment variables in memory
+    for key, value in updates.items():
+        os.environ[key] = value
+
+    # 3. Update config variables dynamically in config module
+    try:
+        import config
+        config.GHL_BASE_URL = updates["GHL_BASE_URL"]
+        config.GHL_API_KEY = updates["GHL_API_KEY"]
+        config.GHL_LOCATION_ID = updates["GHL_LOCATION_ID"]
+    except Exception:
+        pass
+
+    # 4. Update services/ghl.py in-memory
+    try:
+        import services.ghl
+        services.ghl.GHL_BASE_URL = updates["GHL_BASE_URL"]
+        services.ghl.GHL_API_KEY = updates["GHL_API_KEY"]
+        services.ghl.GHL_LOCATION_ID = updates["GHL_LOCATION_ID"]
+    except Exception:
+        pass
+
+    # 5. Update services/booking_service.py in-memory
+    try:
+        import services.booking_service
+        services.booking_service.GHL_BASE_URL = updates["GHL_BASE_URL"]
+        services.booking_service.GHL_LOCATION_ID = updates["GHL_LOCATION_ID"]
+    except Exception:
+        pass
+
+    # 6. Update services/ghl_search.py in-memory
+    try:
+        import services.ghl_search
+        services.ghl_search.GHL_BASE_URL = updates["GHL_BASE_URL"]
+        services.ghl_search.GHL_API_KEY = updates["GHL_API_KEY"]
+        services.ghl_search.GHL_LOCATION_ID = updates["GHL_LOCATION_ID"]
+    except Exception:
+        pass
+
+    return RedirectResponse("/admin/settings?saved=1", status_code=status.HTTP_303_SEE_OTHER)

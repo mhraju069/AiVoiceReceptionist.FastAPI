@@ -9,7 +9,7 @@ We observe all US Federal holidays.
 
 == CONTACT INFORMATION ==
 Phone: +1-800-555-0199
-Email: contact@payminimumtax.com
+Email: Info@payminimumtax.com
 Website: www.payminimumtax.com
 
 == SERVICES ==
@@ -56,6 +56,8 @@ Website: www.payminimumtax.com
 - Tanzina: Client Relations Manager — primary point of contact for most client inquiries and scheduling
 - Alex: Tax Associate — handles follow-ups, standard client calls, and document requests
 - Nafi: Junior Associate — supports general inquiries, scheduling, and administrative tasks
+Mushtari: Payroll Administrator, supervises Payroll runs.
+Shamim: Sales Tax Accountant.
 - রেবা: AI Front-Desk Receptionist — handles initial call routing, appointment booking, and general inquiries
 
 Note: Always route through রেবা (AI) first. Never give out direct staff personal contact information.
@@ -110,7 +112,7 @@ Q: What documents do I need for tax preparation?
 A: Generally, W-2s, 1099s, prior year tax returns, receipts for deductions, and any investment statements. Our team will provide a full checklist during your consultation.
 
 Q: How long does tax preparation take?
-A: It depends on the complexity. Simple returns may take a few days. Complex business returns may take one to two weeks.
+A: It depends on the complexity. Simple returns may take a few days. Complex business returns may take one to two weeks. Our workflow is designed to finish most jobs in two weeks, unless specified in engagement letter.
 
 Q: Can you handle both personal and business taxes?
 A: Yes. We handle personal, business, and multi-entity tax situations.

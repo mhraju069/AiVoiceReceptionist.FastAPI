@@ -491,7 +491,17 @@ async def incoming_call(request: Request):
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{stream_url_xml}" />
+        <Stream url="{stream_url_xml}">
+            <Parameter name="callerNumber" value="{html.escape(caller_number)}" />
+            <Parameter name="contactName" value="{html.escape(contact_name)}" />
+            <Parameter name="clientType" value="{html.escape(client_type)}" />
+            <Parameter name="group" value="{html.escape(group)}" />
+            <Parameter name="contactId" value="{html.escape(contact_id)}" />
+            <Parameter name="invoiceDue" value="{html.escape(invoice_due)}" />
+            <Parameter name="email" value="{html.escape(email)}" />
+            <Parameter name="businessName" value="{html.escape(business_name)}" />
+            <Parameter name="clientNotes" value="{html.escape(client_notes)}" />
+        </Stream>
     </Connect>
 </Response>"""
 
@@ -505,19 +515,68 @@ async def twilio_stream(websocket: WebSocket):
     between Twilio and the OpenAI Realtime API.
     """
     await websocket.accept()
-    caller_number = websocket.query_params.get("caller_number", "Unknown")
-    contact_name  = websocket.query_params.get("contact_name", "Prospect")
-    client_type   = websocket.query_params.get("client_type", "Prospect")
-    group         = websocket.query_params.get("group", "")
-    contact_id    = websocket.query_params.get("contact_id", "")
-    invoice_due   = websocket.query_params.get("invoice_due", "false") == "true"
-    email         = websocket.query_params.get("email", "")
-    business_name = websocket.query_params.get("business_name", "")
-    client_notes = websocket.query_params.get("client_notes", "")
+
+    # Initialize variables with default fallback values
+    caller_number = "Unknown"
+    contact_name  = "Prospect"
+    client_type   = "Prospect"
+    group         = ""
+    contact_id    = ""
+    invoice_due   = False
+    email         = ""
+    business_name = ""
+    client_notes  = ""
+    stream_sid    = None
+    call_sid      = None
+
+    # Wait for the start event from Twilio (which is always the first message)
+    try:
+        first_message = await websocket.receive_text()
+        data = json.loads(first_message)
+        if data.get("event") == "start":
+            stream_sid = data["start"]["streamSid"]
+            call_sid = data["start"].get("callSid")
+            custom_params = data["start"].get("customParameters", {})
+
+            caller_number = custom_params.get("callerNumber", "Unknown")
+            contact_name  = custom_params.get("contactName", "Prospect")
+            client_type   = custom_params.get("clientType", "Prospect")
+            group         = custom_params.get("group", "")
+            contact_id    = custom_params.get("contactId", "")
+            invoice_due   = custom_params.get("invoiceDue", "false") == "true"
+            email         = custom_params.get("email", "")
+            business_name = custom_params.get("businessName", "")
+            client_notes  = custom_params.get("clientNotes", "")
+
+            logger.info(f"🎬 [Twilio -> Server] Handshake received. Stream SID: [{stream_sid}], Call SID: [{call_sid}], Caller: [{caller_number}]")
+            logger.info(f"📌 [Caller Profile] Name: {contact_name} | Type: {client_type} | Group: {group} | Notes: {client_notes}")
+        else:
+            # Fallback if first message is not 'start'
+            caller_number = websocket.query_params.get("caller_number", "Unknown")
+            contact_name  = websocket.query_params.get("contact_name", "Prospect")
+            client_type   = websocket.query_params.get("client_type", "Prospect")
+            group         = websocket.query_params.get("group", "")
+            contact_id    = websocket.query_params.get("contact_id", "")
+            invoice_due   = websocket.query_params.get("invoice_due", "false") == "true"
+            email         = websocket.query_params.get("email", "")
+            business_name = websocket.query_params.get("business_name", "")
+            client_notes  = websocket.query_params.get("client_notes", "")
+    except Exception as e:
+        logger.error(f"Error processing Twilio start event: {e}")
+        # Fallback to query parameters
+        caller_number = websocket.query_params.get("caller_number", "Unknown")
+        contact_name  = websocket.query_params.get("contact_name", "Prospect")
+        client_type   = websocket.query_params.get("client_type", "Prospect")
+        group         = websocket.query_params.get("group", "")
+        contact_id    = websocket.query_params.get("contact_id", "")
+        invoice_due   = websocket.query_params.get("invoice_due", "false") == "true"
+        email         = websocket.query_params.get("email", "")
+        business_name = websocket.query_params.get("business_name", "")
+        client_notes  = websocket.query_params.get("client_notes", "")
+
     logger.info(f"\n🎙️ [WebSocket] {caller_number} | {contact_name} | {client_type} | Group:{group} | Invoice:{invoice_due}")
+    
     # Metadata for call logging
-    stream_sid = None
-    call_sid = None
     transcript_accumulator = []
     openai_ws = None
     start_time_dt = datetime.datetime.utcnow()
@@ -542,6 +601,17 @@ async def twilio_stream(websocket: WebSocket):
             from services.prompts import system_prompt
             instructions, selected_greeting = system_prompt()
 
+            # Greet known client by notes if available, else by name
+            greeting_name = client_notes.strip() if (client_notes and client_notes.strip()) else contact_name
+            if greeting_name and greeting_name != "Prospect":
+                # Check greetings list to keep branding, but personalize it
+                if "Dhonnobad, Thank you for calling Pay Minimum Tax" in selected_greeting:
+                    selected_greeting = selected_greeting.replace("How can I help you?", f"Hello, {greeting_name}! How can I help you today?")
+                    selected_greeting = selected_greeting.replace("What could I do for you?", f"Hello, {greeting_name}! What can I do for you today?")
+                    selected_greeting = selected_greeting.replace("Who do I have the pleasure to speak with today?", f"Hello, {greeting_name}! How can I help you today?")
+                else:
+                    selected_greeting = f"Dhonnobad, Thank you for calling Pay Minimum Tax, I am রেবা. Hello, {greeting_name}! How can I help you today?"
+
             # Send session configuration to OpenAI
             session_update = {
                 "type": "session.update",
@@ -549,7 +619,7 @@ async def twilio_stream(websocket: WebSocket):
                     "type": "realtime",
                     "model": OPENAI_REALTIME_MODEL,
                     "output_modalities": ["audio"],
-                    "instructions": instructions + """
+                    "instructions": instructions + f"""
 
                     # ADDITIONAL SESSION RULES
                     - You are BILINGUAL: English and Bangla ONLY.
@@ -560,6 +630,17 @@ async def twilio_stream(websocket: WebSocket):
                     - NEVER switch to any other language.
                     - If you are not sure if the caller is speaking to you, stay silent.
                     - If you asked permission to end the call, treat English/Bangla/phonetic confirmations like yes, ok, sure, ji, haan, hya, kato, cut, hang up, no more, হ্যাঁ, জি, ঠিক আছে, কাটো, কেটে দেন, or আর কিছু না as permission. Then say a warm goodbye and call `end_call`.
+                    
+                    # CALLER CRM PROFILE
+                    - Name: {contact_name}
+                    - Phone: {caller_number} (Note: Always confirm this number instead of asking for it. All clients are US-based with +1 prefix.)
+                    - Client Type: {client_type}
+                    - Group: {group}
+                    - Contact ID: {contact_id}
+                    - Email: {email if email else 'Not Provided'}
+                    - Business Name: {business_name if business_name else 'Not Provided'}
+                    - Client Notes from CRM: {client_notes if client_notes else 'None'}
+                    - Has Invoice Due: {invoice_due}
                     """,
                     
                     "audio": {
@@ -803,17 +884,17 @@ async def twilio_stream(websocket: WebSocket):
             except Exception:
                 pass
             try:
-                # Detect language from transcript accumulator
+                # Detect language from transcript accumulator (only checking caller messages)
                 is_bangla_convo = False
                 for entry in reversed(transcript_accumulator):
-                    if any('\u0980' <= char <= '\u09FF' for char in entry):
+                    if entry.startswith("Caller:") and any('\u0980' <= char <= '\u09FF' for char in entry):
                         is_bangla_convo = True
                         break
                 
                 if is_bangla_convo:
-                    goodbye_instr = "In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking."
+                    goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
                 else:
-                    goodbye_instr = "In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking."
+                    goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
 
                 await openai_ws.send(json.dumps({
                     "type": "response.create",
