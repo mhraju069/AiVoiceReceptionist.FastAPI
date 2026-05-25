@@ -18,7 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from services.openai_realtime import get_openai_realtime_model, get_openai_realtime_ws_url
 from services.prompts import system_prompt
-from routers.twilio import ADS, _asks_end_call_permission, _is_end_call_consent
+from routers.twilio import ADS, _asks_end_call_permission, _is_end_call_consent, _is_negative_response
 from routers.common_tools import (
     handle_book_appointment,
     handle_get_slots,
@@ -93,7 +93,8 @@ async def demo_voice_stream(websocket: WebSocket):
     last_ai_response_done_at: list = [None]   # use list so inner funcs can mutate
     caller_spoke_after_ai: list = [False]       # reset when AI responds, set when caller speaks
     watchdog_active: list = [False]             # becomes True after first greeting is done
-    end_call_permission_pending: list = [False]
+    # 3-state call-close tracker: 0=idle, 1=end_call_permission_asked
+    call_close_state: list = [0]
 
     async def _send(msg: dict):
         """Helper to safely send JSON to browser."""
@@ -179,7 +180,18 @@ async def demo_voice_stream(websocket: WebSocket):
                         - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
                         - NEVER switch to any other language.
                         - If you are not sure if the caller is speaking to you, stay silent.
-                        - If you asked permission to end the call, treat English/Bangla/phonetic confirmations like yes, ok, sure, ji, haan, hya, kato, cut, hang up, no more, হ্যাঁ, জি, ঠিক আছে, কাটো, কেটে দেন, or আর কিছু না as permission. Then say a warm goodbye and call `end_call`.
+                        - CALL ENDING FLOW (follow exactly, in order):
+                          STEP 1 — After completing any task, ask naturally if they need more help:
+                            English: "Is there anything else I can help you with?" (vary wording each time)
+                            Bangla: "আর কোনো সাহায্য করতে পারি?" (vary wording each time)
+                          STEP 2 — If they say NO (no, nah, nope, না, নাহ, that's all, আর লাগবে না, etc.) — ask permission ONCE:
+                            English: "Okay, can I go ahead and end the call now?"
+                            Bangla: "ঠিক আছে, আমি কি তাহলে call টা শেষ করে দিই?"
+                          STEP 3 — Wait for their response to the permission question:
+                            - If they say YES/positive (yes, ok, sure, ji, হ্যাঁ, জি, কাটো, etc.) → say goodbye in the SAME language, then call `end_call`.
+                            - If they say NO/negative (no, wait, na, না, আরেকটু, etc.) → say "Of course, go ahead!" or "জি বলুন!" and CONTINUE the conversation. Do NOT call `end_call`. Do NOT ask permission again.
+                            - If you cannot understand what they said → say "Sorry, I didn't catch that. Could you repeat?" or "Sorry, একটু আবার বলবেন?" — Do NOT ask for permission again.
+                          CRITICAL: NEVER ask the permission question (Step 2) more than once per conversation flow.
                         
                         # CALLER CRM PROFILE
                         - Name: {contact_name}
@@ -406,23 +418,30 @@ async def demo_voice_stream(websocket: WebSocket):
                 if end_call_in_progress[0] or call_done.is_set():
                     return
                 end_call_in_progress[0] = True
-                end_call_permission_pending[0] = False
+                call_close_state[0] = 0
                 try:
                     await openai_ws.send(json.dumps({"type": "response.cancel"}))
                 except Exception:
                     pass
-                    # Detect language from user transcript accumulator only
-                    is_bangla_convo = False
-                    for entry in reversed(user_transcripts):
-                        if any('\u0980' <= char <= '\u09FF' for char in entry):
-                            is_bangla_convo = True
-                            break
-                    
-                    if is_bangla_convo:
-                        goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
-                    else:
-                        goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
 
+                # Detect language from USER transcripts only (not AI transcripts)
+                is_bangla_convo = False
+                banglish_indicators = {"ami", "apne", "apnar", "tumi", "kemon", "accha", "acha", "thik", "kore", "korechi", "koren", "kete", "den", "din", "ji", "ha", "na", "bhai", "somossa", "rakhlam", "rakhchi", "allah", "hafez", "khoda"}
+                for entry in reversed(user_transcripts):
+                    if any('\u0980' <= char <= '\u09FF' for char in entry):
+                        is_bangla_convo = True
+                        break
+                    words = [w.strip("?,.!") for w in entry.lower().split()]
+                    if any(w in banglish_indicators for w in words):
+                        is_bangla_convo = True
+                        break
+
+                if is_bangla_convo:
+                    goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
+                else:
+                    goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
+
+                try:
                     await openai_ws.send(json.dumps({
                         "type": "response.create",
                         "response": {
@@ -434,6 +453,10 @@ async def demo_voice_stream(websocket: WebSocket):
                     await asyncio.sleep(4)
                 finally:
                     await _end_demo_call()
+
+            # Define once — reused for every tool call, avoids per-iteration closure issues
+            async def _log_adapter(event, message):
+                await _debug(event, message)
 
             try:
                 async for openai_message in openai_ws:
@@ -473,10 +496,10 @@ async def demo_voice_stream(websocket: WebSocket):
                         if text:
                             ai_transcripts.append(text)
                             if _asks_end_call_permission(text):
-                                end_call_permission_pending[0] = True
+                                call_close_state[0] = 1
+                                await _debug("end_call_state", "📋 Permission question asked — waiting for caller response.")
                             await _debug("ai_transcript", f"🤖 AI: {text}")
                             await _send({"type": "transcript", "role": "assistant", "text": text})
-                            
 
                     elif evt == "conversation.item.input_audio_transcription.completed":
                         user_text = openai_data.get("transcript")
@@ -484,10 +507,24 @@ async def demo_voice_stream(websocket: WebSocket):
                             user_transcripts.append(user_text)
                             await _debug("user_transcript", f"👤 User: {user_text}")
                             await _send({"type": "transcript", "role": "user", "text": user_text})
-                            is_consent = end_call_permission_pending[0] and _is_end_call_consent(user_text)
+
+                            # Explicit hangup cues always trigger hangup regardless of state
                             is_explicit = any(cue in user_text.lower() for cue in ["kete dao", "kete den", "kete din", "cut kore den", "kat kore den", "কেটে দাও", "কেটে দেন", "কেটে দিন", "কল কেটে", "কলটা কেটে", "cut the call", "hang up", "allah hafez", "khoda hafez", "রাখলাম", "রাখছি", "rakhlam", "rakhchi", "bye bye", "allah hafiz"])
-                            if is_consent or is_explicit:
+
+                            if is_explicit:
                                 asyncio.create_task(_end_demo_after_consent())
+                            elif call_close_state[0] == 1:
+                                # Permission was asked — evaluate response
+                                is_consent = _is_end_call_consent(user_text)
+                                is_negative = _is_negative_response(user_text)
+                                if is_consent:
+                                    await _debug("end_call_consent", "✅ Caller consented — ending call.")
+                                    asyncio.create_task(_end_demo_after_consent())
+                                elif is_negative:
+                                    call_close_state[0] = 0
+                                    await _debug("end_call_declined", "↩️ Caller declined — resetting, continuing conversation.")
+                                else:
+                                    await _debug("end_call_unclear", "❓ Unclear response — AI will ask caller to repeat.")
                             
 
                     elif evt == "input_audio_buffer.speech_started":
@@ -538,16 +575,13 @@ async def demo_voice_stream(websocket: WebSocket):
                         caller_spoke_after_ai[0] = False
                         await _debug("response_done", f"✅ Response done. Audio duration: {audio_duration_sec:.2f}s")
 
-                    elif openai_data.get("type") == "response.function_call_arguments.done":
+                    elif evt == "response.function_call_arguments.done":
                         func_name = openai_data.get("name")
                         call_id = openai_data.get("call_id")
                         args = json.loads(openai_data.get("arguments", "{}"))
                         await _debug("tool_call", f"🛠️ AI called {func_name} with args: {args}")
-                        result = {}
+                        result = {}  # Default — prevents NameError if func_name is unknown
                         
-                        async def _log_adapter(event, message):
-                            await _debug(event, message)
-
                         if func_name == "transfer_call":
                             result = await handle_transfer_call(args, openai_ws, call_done, call_id, _log_adapter)
                             await openai_ws.send(json.dumps({
@@ -572,7 +606,7 @@ async def demo_voice_stream(websocket: WebSocket):
                                 openai_ws,
                                 call_done,
                                 end_call_in_progress,
-                                ai_transcripts + user_transcripts,
+                                user_transcripts,  # Only user speech for language detection
                                 call_id,
                                 _log_adapter,
                                 _end_demo_call
@@ -663,7 +697,7 @@ async def demo_voice_stream(websocket: WebSocket):
 def _build_call_summary(user_transcripts, ai_transcripts, duration):
     """Build a summary object from the call transcripts."""
     conversation = []
-    max_len = max(len(user_transcripts), len(ai_transcripts))
+    max_len = max(len(user_transcripts), len(ai_transcripts), 1)  # guard against empty lists
     
     for i in range(max_len):
         if i < len(ai_transcripts):

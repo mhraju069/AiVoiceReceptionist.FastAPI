@@ -180,6 +180,31 @@ def _is_end_call_consent(text: str) -> bool:
     return False
 
 
+# Words/phrases that mean "No" / "I want to continue" in English, Banglish, or Bangla
+_NEGATIVE_WORDS = {
+    "no", "nope", "nah", "na", "not", "never",
+    "না", "নাহ", "নো",
+}
+_NEGATIVE_PHRASES = (
+    "no thank", "not yet", "i have", "actually", "wait", "hold on",
+    "one more", "আরো", "আরও", "একটু", "আর একটু", "আর একটা",
+    "আছে", "লাগবে", "বলতে চাই",
+)
+
+def _is_negative_response(text: str) -> bool:
+    """Returns True if the user is saying NO / wants to continue the conversation."""
+    lowered = (text or "").lower().strip()
+    normalized = _normalized_text(text)
+    words = set(normalized.split())
+    if words & _NEGATIVE_WORDS:
+        return True
+    if any(phrase in lowered or phrase in normalized for phrase in _NEGATIVE_PHRASES):
+        return True
+    if any(char in (text or "") for char in ["না", "নাহ"]):
+        return True
+    return False
+
+
 def _is_meaningful_transcript(text: str) -> bool:
     cleaned = re.sub(r"[^A-Za-z0-9\u0980-\u09FF\s]", " ", text or "").strip()
     if not cleaned:
@@ -586,7 +611,8 @@ async def twilio_stream(websocket: WebSocket):
     last_ai_response_done_at: list = [None]
     caller_spoke_after_ai: list = [False]
     watchdog_active: list = [False]
-    end_call_permission_pending: list = [False]
+    # 3-state call-close tracker: 0=idle, 1=end_call_permission_asked
+    call_close_state: list = [0]
 
     # Connect to OpenAI Realtime API if the API key is present
     if OPENAI_API_KEY:
@@ -629,7 +655,18 @@ async def twilio_stream(websocket: WebSocket):
                     - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
                     - NEVER switch to any other language.
                     - If you are not sure if the caller is speaking to you, stay silent.
-                    - If you asked permission to end the call, treat English/Bangla/phonetic confirmations like yes, ok, sure, ji, haan, hya, kato, cut, hang up, no more, হ্যাঁ, জি, ঠিক আছে, কাটো, কেটে দেন, or আর কিছু না as permission. Then say a warm goodbye and call `end_call`.
+                    - CALL ENDING FLOW (follow exactly, in order):
+                      STEP 1 — After completing any task, ask naturally if they need more help:
+                        English: "Is there anything else I can help you with?" (vary wording each time)
+                        Bangla: "আর কোনো সাহায্য করতে পারি?" (vary wording each time)
+                      STEP 2 — If they say NO (no, nah, nope, না, নাহ, that's all, আর লাগবে না, etc.) — ask permission ONCE:
+                        English: "Okay, can I go ahead and end the call now?"
+                        Bangla: "ঠিক আছে, আমি কি তাহলে call টা শেষ করে দিই?"
+                      STEP 3 — Wait for their response to the permission question:
+                        - If they say YES/positive (yes, ok, sure, ji, হ্যাঁ, জি, কাটো, etc.) → say goodbye in the SAME language, then call `end_call`.
+                        - If they say NO/negative (no, wait, na, না, আরেকটু, etc.) → say "Of course, go ahead!" or "জি বলুন!" and CONTINUE the conversation. Do NOT call `end_call`. Do NOT ask permission again.
+                        - If you cannot understand what they said → say "Sorry, I didn't catch that. Could you repeat?" or "Sorry, একটু আবার বলবেন?" — Do NOT ask for permission again.
+                      CRITICAL: NEVER ask the permission question (Step 2) more than once per conversation flow. If the user already heard it and responded, move on accordingly.
                     
                     # CALLER CRM PROFILE
                     - Name: {contact_name}
@@ -878,19 +915,27 @@ async def twilio_stream(websocket: WebSocket):
             if end_call_in_progress[0] or call_done.is_set():
                 return
             end_call_in_progress[0] = True
-            end_call_permission_pending[0] = False
+            call_close_state[0] = 0
             try:
                 await openai_ws.send(json.dumps({"type": "response.cancel"}))
             except Exception:
                 pass
             try:
-                # Detect language from transcript accumulator (only checking caller messages)
+                # Detect language from caller speech only — skip AI transcript entries
                 is_bangla_convo = False
+                banglish_indicators = {"ami", "apne", "apnar", "tumi", "kemon", "accha", "acha", "thik", "kore", "korechi", "koren", "kete", "den", "din", "ji", "ha", "na", "bhai", "somossa", "rakhlam", "rakhchi", "allah", "hafez", "khoda"}
                 for entry in reversed(transcript_accumulator):
-                    if entry.startswith("Caller:") and any('\u0980' <= char <= '\u09FF' for char in entry):
+                    if not entry.startswith("Caller:"):
+                        continue  # Skip AI entries
+                    text = entry[len("Caller:"):].strip()
+                    if any('\u0980' <= char <= '\u09FF' for char in text):
                         is_bangla_convo = True
                         break
-                
+                    words = [w.strip("?,.!") for w in text.lower().split()]
+                    if any(w in banglish_indicators for w in words):
+                        is_bangla_convo = True
+                        break
+
                 if is_bangla_convo:
                     goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
                 else:
@@ -907,6 +952,10 @@ async def twilio_stream(websocket: WebSocket):
                 await asyncio.sleep(4)
             finally:
                 await _hangup_call()
+
+        # Define once — reused for every tool call, avoids per-iteration closure issues
+        async def _log_adapter(event, message):
+            logger.info(f"[{event}] {message}")
 
         try:
             async for openai_message in openai_ws:
@@ -1028,19 +1077,36 @@ async def twilio_stream(websocket: WebSocket):
                         logger.info(f"\n🤖 [AI Reply]: {text}")
                         transcript_accumulator.append(f"AI: {text}")
                         if _asks_end_call_permission(text):
-                            end_call_permission_pending[0] = True
-                        
-                
+                            call_close_state[0] = 1  # permission question was asked
+                            logger.info("📋 [EndCall] Permission question asked — waiting for caller response.")
+
+
                 # Catch the user's speech transcript + detect caller goodbye
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     user_text = openai_data.get("transcript")
                     if user_text:
                         logger.info(f"\n👤 [Caller]: {user_text}")
                         transcript_accumulator.append(f"Caller: {user_text}")
-                        is_consent = end_call_permission_pending[0] and _is_end_call_consent(user_text)
+
+                        # Explicit hangup cues always trigger hangup regardless of state
                         is_explicit = any(cue in user_text.lower() for cue in ["kete dao", "kete den", "kete din", "cut kore den", "kat kore den", "কেটে দাও", "কেটে দেন", "কেটে দিন", "কল কেটে", "কলটা কেটে", "cut the call", "hang up", "allah hafez", "khoda hafez", "রাখলাম", "রাখছি", "rakhlam", "rakhchi", "bye bye", "allah hafiz"])
-                        if is_consent or is_explicit:
+
+                        if is_explicit:
                             asyncio.create_task(_hangup_after_consent())
+                        elif call_close_state[0] == 1:
+                            # Permission question was asked — evaluate the caller's response
+                            is_consent = _is_end_call_consent(user_text)
+                            is_negative = _is_negative_response(user_text)
+                            if is_consent:
+                                logger.info("✅ [EndCall] Caller consented — hanging up.")
+                                asyncio.create_task(_hangup_after_consent())
+                            elif is_negative:
+                                # Caller wants to continue — reset state, let AI continue conversation
+                                call_close_state[0] = 0
+                                logger.info("↩️ [EndCall] Caller declined — resetting, continuing conversation.")
+                            else:
+                                # Unclear response — AI will ask to repeat (no state change)
+                                logger.info("❓ [EndCall] Unclear response — AI will ask caller to repeat.")
                         
 
                 # Handle tool calls
@@ -1049,9 +1115,7 @@ async def twilio_stream(websocket: WebSocket):
                     call_id = openai_data.get("call_id")
                     args = json.loads(openai_data.get("arguments", "{}"))
                     logger.info(f"\n🛠️ [OpenAI] AI called tool '{func_name}' with args: {args}")
-                    
-                    async def _log_adapter(event, message):
-                        logger.info(f"[{event}] {message}")
+                    result = {}  # Default — prevents NameError if func_name is unknown
 
                     if func_name == "transfer_call":
                         result = await handle_transfer_call(args, openai_ws, call_done, call_id, _log_adapter)

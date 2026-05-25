@@ -239,14 +239,20 @@ async def handle_end_call(
         end_call_in_progress[0] = True
         
         async def _delayed_hangup():
-            # Detect language from transcript history
+            # Detect language from caller/user speech only — skip AI transcript entries
+            # Entries may be raw strings (demo.py) or prefixed with "Caller:"/"AI:" (twilio.py)
             is_bangla_convo = False
             banglish_indicators = {"ami", "apne", "apnar", "tumi", "kemon", "accha", "acha", "thik", "kore", "korechi", "koren", "kete", "den", "din", "ji", "ha", "na", "bhai", "somossa", "rakhlam", "rakhchi", "allah", "hafez", "khoda"}
             for entry in reversed(transcript_history):
-                if any('\u0980' <= char <= '\u09FF' for char in entry):
+                # Skip AI-generated transcript lines to avoid false Bangla detection
+                if entry.startswith("AI:"):
+                    continue
+                # Strip "Caller: " prefix if present
+                text = entry[len("Caller:"):].strip() if entry.startswith("Caller:") else entry
+                if any('\u0980' <= char <= '\u09FF' for char in text):
                     is_bangla_convo = True
                     break
-                words = [w.strip("?,.!") for w in entry.lower().split()]
+                words = [w.strip("?,.!") for w in text.lower().split()]
                 if any(w in banglish_indicators for w in words):
                     is_bangla_convo = True
                     break
@@ -260,7 +266,7 @@ async def handle_end_call(
                 await openai_ws.send(json.dumps({"type": "response.cancel"}))
             except Exception:
                 pass
-            
+
             try:
                 await openai_ws.send(json.dumps({
                     "type": "response.create",
@@ -270,11 +276,11 @@ async def handle_end_call(
                     }
                 }))
                 await logger_or_debug("end_call_consent", f"✅ Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then ending.")
+                await asyncio.sleep(4)
             except Exception as e:
                 await logger_or_debug("end_call_error", f"Error triggering goodbye: {e}")
-            
-            await asyncio.sleep(4)
-            await hangup_fn()
+            finally:
+                await hangup_fn()
             
         asyncio.create_task(_delayed_hangup())
     else:
