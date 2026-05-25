@@ -428,54 +428,105 @@ async def send_sms_via_ghl(to_phone: str, message: str) -> bool:
         logger.error("❌ [GHL SMS] Could not get or create contact_id.")
         return False
 
-    # Send message using GHL V1 or V2
+    # Send message via GHL — conversation-based approach (correct for both V1 and V2)
     headers = get_ghl_headers()
-    from_num = os.getenv("GHL_FROM_NUMBER", "+17814887674")
-    
-    if "rest.gohighlevel.com" in GHL_BASE_URL or "api.gohighlevel.com" in GHL_BASE_URL:
-        # GHL V1 endpoint
-        url = f"{GHL_BASE_URL}/contacts/{contact_id}/messages"
-        payload = {
-            "type": "SMS",
-            "message": message
-        }
-        if from_num:
-            payload["fromNumber"] = from_num
-            
-        async with httpx.AsyncClient(timeout=15.0) as client:
+    from_num = os.getenv("GHL_FROM_NUMBER", "")
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try_v2 = False
+
+        if "rest.gohighlevel.com" in GHL_BASE_URL or "api.gohighlevel.com" in GHL_BASE_URL:
+            # ── Attempt GHL V1 ──
+            convo_id = None
             try:
-                # Remove trailing slash for stability
-                clean_url = url.rstrip('/')
-                resp = await client.post(clean_url, json=payload, headers=headers)
-                if resp.status_code in [200, 201]:
-                    logger.info(f"✅ [GHL SMS] V1 message sent to {normalized}")
-                    return True
-                else:
-                    logger.error(f"❌ [GHL SMS] V1 Send failed (status={resp.status_code}): {resp.text}")
+                search_resp = await client.get(
+                    f"{GHL_BASE_URL}/conversations/search",
+                    params={"contactId": contact_id, "locationId": GHL_LOCATION_ID},
+                    headers=headers,
+                )
+                if search_resp.status_code == 200:
+                    convos = search_resp.json().get("conversations", [])
+                    if convos:
+                        convo_id = convos[0].get("id")
+                        logger.info(f"✅ [GHL SMS] Found conversation: {convo_id}")
+                elif search_resp.status_code in (401, 403, 404):
+                    # 401/403: Invalid Token for V1 (likely V2 token used)
+                    # 404: Endpoint doesn't exist on V1 (fallback to V2 needed)
+                    logger.info(f"ℹ️ [GHL SMS] V1 search returned {search_resp.status_code}. Automatically switching to GHL V2...")
+                    try_v2 = True
             except Exception as e:
-                logger.error(f"❌ [GHL SMS] V1 send exception: {e}")
-    else:
-        # GHL V2 endpoint
-        url = f"{GHL_BASE_URL}/conversations/messages"
-        headers["Version"] = "2021-07-28"
-        payload = {
-            "type": "SMS",
-            "contactId": contact_id,
-            "message": message
-        }
-        if from_num:
-            payload["fromNumber"] = from_num
-            
-        async with httpx.AsyncClient(timeout=15.0) as client:
+                logger.error(f"❌ [GHL SMS] Conversation search error: {e}")
+                try_v2 = True
+
+            if not try_v2 and not convo_id:
+                try:
+                    create_resp = await client.post(
+                        f"{GHL_BASE_URL}/conversations",
+                        json={"contactId": contact_id, "locationId": GHL_LOCATION_ID},
+                        headers=headers,
+                    )
+                    if create_resp.status_code in (200, 201):
+                        data = create_resp.json()
+                        convo_id = (data.get("conversation") or data).get("id")
+                        logger.info(f"✅ [GHL SMS] Created conversation: {convo_id}")
+                    elif create_resp.status_code in (401, 403, 404):
+                        logger.info(f"ℹ️ [GHL SMS] V1 create returned {create_resp.status_code}. Switching to GHL V2...")
+                        try_v2 = True
+                    else:
+                        logger.error(f"❌ [GHL SMS] Conversation creation failed: {create_resp.status_code} {create_resp.text[:200]}")
+                except Exception as e:
+                    logger.error(f"❌ [GHL SMS] Conversation creation error: {e}")
+                    try_v2 = True
+
+            if not try_v2 and convo_id:
+                # Send message to the conversation
+                try:
+                    payload = {"type": "SMS", "message": message}
+                    if from_num:
+                        payload["fromNumber"] = from_num
+                    msg_resp = await client.post(
+                        f"{GHL_BASE_URL}/conversations/{convo_id}/messages",
+                        json=payload,
+                        headers=headers,
+                    )
+                    if msg_resp.status_code in (200, 201):
+                        logger.info(f"✅ [GHL SMS] V1 SMS sent to {normalized} via conversation {convo_id}")
+                        return True
+                    elif msg_resp.status_code in (401, 403, 404):
+                        logger.info(f"ℹ️ [GHL SMS] V1 send returned {msg_resp.status_code}. Switching to GHL V2...")
+                        try_v2 = True
+                    else:
+                        logger.error(f"❌ [GHL SMS] V1 message failed: {msg_resp.status_code} {msg_resp.text[:300]}")
+                except Exception as e:
+                    logger.error(f"❌ [GHL SMS] V1 send exception: {e}")
+                    try_v2 = True
+            elif not try_v2:
+                logger.error("❌ [GHL SMS] Could not get or create a conversation in V1.")
+                try_v2 = True
+
+        else:
+            try_v2 = True
+
+        if try_v2:
+            # ── GHL V2 (LeadConnector) ──
+            v2_url = "https://services.leadconnectorhq.com/conversations/messages"
+            v2_headers = {**headers, "Version": "2021-07-28"}
+            payload = {
+                "type": "SMS",
+                "contactId": contact_id,
+                "message": message,
+            }
+            if from_num:
+                payload["fromNumber"] = from_num
             try:
-                clean_url = url.rstrip('/')
-                resp = await client.post(clean_url, json=payload, headers=headers)
-                if resp.status_code in [200, 201]:
+                resp = await client.post(v2_url, json=payload, headers=v2_headers)
+                if resp.status_code in (200, 201):
                     logger.info(f"✅ [GHL SMS] V2 message sent to {normalized}")
                     return True
                 else:
-                    logger.error(f"❌ [GHL SMS] V2 Send failed (status={resp.status_code}): {resp.text}")
+                    logger.error(f"❌ [GHL SMS] V2 failed ({resp.status_code}): {resp.text[:300]}")
             except Exception as e:
-                logger.error(f"❌ [GHL SMS] V2 send exception: {e}")
-                
+                logger.error(f"❌ [GHL SMS] V2 exception: {e}")
+
     return False
+

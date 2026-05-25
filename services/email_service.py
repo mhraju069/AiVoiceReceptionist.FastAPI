@@ -9,27 +9,32 @@ from email.mime.multipart import MIMEMultipart
 from config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM
 
 
-def _send_email_sync(to_email: str, subject: str, html_body: str):
-    """Synchronous SMTP email send (run in thread executor)."""
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = SMTP_FROM
-    msg["To"] = to_email
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+def _send_email_sync(to_email: str, subject: str, html_body: str) -> bool:
+    """Synchronous SMTP email send (run in thread executor). Returns True on success."""
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_email
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.sendmail(SMTP_FROM, to_email, msg.as_string())
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, to_email, msg.as_string())
 
-    print(f"📧 [Email] Sent '{subject}' to {to_email}")
+        print(f"📧 [Email] Sent '{subject}' to {to_email}")
+        return True
+    except Exception as e:
+        print(f"❌ [Email] Failed to send '{subject}' to {to_email}: {e}")
+        return False
 
 
-async def send_email(to_email: str, subject: str, html_body: str):
-    """Async wrapper for sending emails."""
+async def send_email(to_email: str, subject: str, html_body: str) -> bool:
+    """Async wrapper for sending emails. Returns True if delivered, False on failure."""
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _send_email_sync, to_email, subject, html_body)
+    return await loop.run_in_executor(None, _send_email_sync, to_email, subject, html_body)
 
 
 async def send_booking_confirmation(
@@ -68,7 +73,7 @@ async def send_booking_confirmation(
 </body>
 </html>
 """
-    await send_email(to_email, subject, html_body)
+    return await send_email(to_email, subject, html_body)
 
 
 async def send_stripe_payment_link(
@@ -109,7 +114,7 @@ async def send_stripe_payment_link(
 </body>
 </html>
 """
-    await send_email(to_email, subject, html_body)
+    return await send_email(to_email, subject, html_body)
 
 async def send_otp_email(to_email: str, otp: str):
     """Send a password reset OTP email."""

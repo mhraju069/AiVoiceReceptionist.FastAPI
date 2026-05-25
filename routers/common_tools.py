@@ -63,13 +63,12 @@ async def send_sms(to_number: str, message_body: str, logger_or_debug=None) -> b
     twilio_number = os.getenv("TWILIO_NUMBER", "")
 
     if not twilio_sid or not twilio_token or not twilio_number:
-        msg = "⚠️ [SMS] Twilio credentials not fully configured. SMS simulation only."
+        msg = "❌ [SMS] Twilio credentials not configured. Cannot send SMS."
         if logger_or_debug:
-            await logger_or_debug("sms_warn", msg)
+            await logger_or_debug("sms_error", msg)
         else:
             print(msg)
-        print(f"📱 [Simulated SMS] To: {clean_to} | Body: {message_body}")
-        return True
+        return False
 
     url = f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Messages.json"
     auth_header = base64.b64encode(f"{twilio_sid}:{twilio_token}".encode()).decode()
@@ -128,12 +127,42 @@ async def handle_book_appointment(args: dict, logger_or_debug) -> dict:
             call_summary=args.get("call_summary", ""),
         )
         await logger_or_debug("tool_result", f"✅ Booking result: {result.get('status')}")
-        
+
         if result.get("status") == "payment_required" and phone:
             payment_url = result.get("payment_url")
-            sms_body = f"Hello {name}, here is the payment link to confirm your appointment: {payment_url}"
-            await send_sms(phone, sms_body, logger_or_debug)
-            
+            sms_body = f"Hello {name}, here is your payment link to confirm your appointment: {payment_url}"
+            sms_sent = await send_sms(phone, sms_body, logger_or_debug)
+
+            # Update the message to reflect actual SMS delivery
+            if sms_sent:
+                result["sms_sent"] = True
+                if result.get("email_sent"):
+                    result["message"] = (
+                        f"To confirm your appointment, a payment of ${result.get('price', '')} is required. "
+                        f"A secure payment link has been sent to {args.get('email', '')} and texted to {phone}."
+                    )
+                else:
+                    result["message"] = (
+                        f"To confirm your appointment, a payment of ${result.get('price', '')} is required. "
+                        f"The payment link has been texted to {phone}. "
+                        f"Email delivery failed — our team will follow up."
+                    )
+            else:
+                result["sms_sent"] = False
+                if not result.get("email_sent"):
+                    # Both channels failed — be fully honest
+                    result["message"] = (
+                        f"SMS_DELIVERY_FAILED EMAIL_DELIVERY_FAILED: "
+                        f"The payment link was generated but could NOT be delivered to {phone} by SMS or email. "
+                        f"Inform the caller that both delivery channels failed, and our team will contact them manually with the payment link."
+                    )
+                else:
+                    result["message"] = (
+                        f"To confirm your appointment, a payment of ${result.get('price', '')} is required. "
+                        f"A secure payment link has been sent to {args.get('email', '')}. "
+                        f"SMS_DELIVERY_FAILED: The text message to {phone} could not be delivered."
+                    )
+
         return result
     except Exception as e:
         await logger_or_debug("tool_error", f"🔴 Booking exception: {e}")
@@ -314,9 +343,21 @@ async def handle_send_link_sms(args: dict, default_phone: str, logger_or_debug) 
     body = messages[link_type]
     sent = await send_sms(phone, body, logger_or_debug)
     if sent:
-        return {"status": "success", "message": f"Link sent to {phone}."}
+        return {
+            "status": "success",
+            "sms_sent": True,
+            "message": f"Text message sent successfully to {phone}."
+        }
     else:
-        return {"status": "error", "message": "Failed to send link via text. Simulated successfully."}
+        return {
+            "status": "sms_failed",
+            "sms_sent": False,
+            "message": (
+                f"SMS_DELIVERY_FAILED: The text message could NOT be delivered to {phone}. "
+                f"Inform the caller that the link could not be texted at this time, "
+                f"and our team will send it manually."
+            )
+        }
 
 async def handle_record_message(args: dict, contact_id: str, default_name: str, default_phone: str, logger_or_debug) -> dict:
     caller_name_arg  = args.get("caller_name", default_name) or "Caller"

@@ -224,17 +224,35 @@ async def book_appointment(
             customer_phone=phone,
             amount_cents=int(price * 100),
         )
-        await send_stripe_payment_link(
+        # Send the Stripe payment link email and track delivery
+        email_sent = await send_stripe_payment_link(
             to_email=email,
             contact_name=name or "Caller",
             payment_url=payment_url,
             call_summary=call_summary,
         )
+
+        if email_sent:
+            message = (
+                f"To confirm your appointment, a payment of ${price} is required. "
+                f"A secure payment link has been sent to {email}. "
+                f"The appointment will be booked after payment is completed."
+            )
+        else:
+            # Email failed — be honest with the AI so it can tell the caller
+            message = (
+                f"EMAIL_DELIVERY_FAILED: The payment link was generated (url={payment_url}) "
+                f"but could NOT be delivered to {email}. "
+                f"Inform the caller that the email could not be sent at this time, "
+                f"and that our team will follow up with the payment link manually."
+            )
+
         return {
             "status": "payment_required",
             "price": price,
             "payment_url": payment_url,
-            "message": f"To confirm your appointment, a payment of ${price} is required. A secure payment link has been sent to {email}. The appointment will be booked after payment is completed."
+            "email_sent": email_sent,
+            "message": message,
         }
 
     if not contact_id:
@@ -321,21 +339,37 @@ async def book_appointment(
         booking_date = booking_slot[:10]
         booking_time = booking_slot[11:16]
 
+    # Step 3b: Send confirmation email and track delivery
+    email_sent = False
     try:
-        await send_booking_confirmation(
+        email_sent = await send_booking_confirmation(
             to_email=email,
             contact_name=contact_name,
             booking_date=booking_date,
             booking_time=booking_time,
             call_summary=call_summary,
         )
-        print(f"📧 [BookingService] Confirmation email sent to {email}")
+        if email_sent:
+            print(f"📧 [BookingService] Confirmation email sent to {email}")
+        else:
+            print(f"⚠️ [BookingService] Confirmation email FAILED for {email}")
     except Exception as e:
-        print(f"⚠️ [BookingService] Email failed (non-fatal): {e}")
+        print(f"⚠️ [BookingService] Email exception (non-fatal): {e}")
+
+    if email_sent:
+        confirm_message = f"Appointment confirmed for {contact_name} on {booking_date} at {booking_time}. A confirmation email has been sent to {email}."
+    else:
+        confirm_message = (
+            f"Appointment confirmed for {contact_name} on {booking_date} at {booking_time}. "
+            f"EMAIL_DELIVERY_FAILED: The confirmation email could NOT be delivered to {email}. "
+            f"Inform the caller that the booking is confirmed, but the confirmation email could not be sent. "
+            f"Our team will send it manually."
+        )
 
     return {
         "status": "confirmed",
         "appointment_id": appointment_id,
         "contact_id": contact_id,
-        "message": f"Appointment confirmed for {contact_name} on {booking_date} at {booking_time}.",
+        "email_sent": email_sent,
+        "message": confirm_message,
     }
