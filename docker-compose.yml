@@ -41,7 +41,7 @@ services:
     container_name: nginx_proxy
     restart: always
     ports:
-      - "8000:80" # Maps port 80 of the host to port 80 of the container
+      - "8083:80" # Maps port 80 of the host to port 80 of the container
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
