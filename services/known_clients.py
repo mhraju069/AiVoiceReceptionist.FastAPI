@@ -36,6 +36,29 @@ def find_known_client_by_phone(phone: str) -> Optional[dict]:
     return None
 
 
+def find_known_client_by_email(email: str) -> Optional[dict]:
+    """Find a client by email address (case-insensitive)."""
+    if not email or not email.strip():
+        return None
+    email_lower = email.strip().lower()
+    for client in _load_known_clients():
+        if client.get("email", "").strip().lower() == email_lower:
+            return client
+    return None
+
+
+def find_known_client_by_company(company: str) -> Optional[dict]:
+    """Find a client by business name (case-insensitive, partial match)."""
+    if not company or not company.strip():
+        return None
+    company_lower = company.strip().lower()
+    for client in _load_known_clients():
+        biz = client.get("business_name", "").strip().lower()
+        if biz and (biz == company_lower or company_lower in biz or biz in company_lower):
+            return client
+    return None
+
+
 def save_known_clients(clients: list[dict]) -> None:
     KNOWN_CLIENTS_PATH.write_text(json.dumps(clients, indent=2), encoding="utf-8")
     _load_known_clients.cache_clear()

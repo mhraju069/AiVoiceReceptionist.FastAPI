@@ -305,7 +305,7 @@ async def handle_end_call(
                     }
                 }))
                 await logger_or_debug("end_call_consent", f"✅ Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then ending.")
-                await asyncio.sleep(4)
+                await asyncio.sleep(8)
             except Exception as e:
                 await logger_or_debug("end_call_error", f"Error triggering goodbye: {e}")
             finally:

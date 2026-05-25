@@ -133,10 +133,13 @@ def validate_office_slot(slot: str) -> tuple[bool, str]:
 
 
 async def get_slots(calendar_type: str = "follow_up_b", timezone: str = OFFICE_TIMEZONE) -> dict:
-    """Fetch available slots for the next 7 days from GHL for a specific calendar."""
+    """Fetch available slots for the next 7 days from GHL for a specific calendar.
+    Retries up to 3 times with exponential backoff to handle intermittent GHL API timeouts.
+    """
+    import asyncio as _asyncio
     cal_config = get_calendar_config(calendar_type)
     calendar_id = cal_config["id"]
-    
+
     url = f"{GHL_BASE_URL}/appointments/slots"
     now_ms = int(time.time() * 1000)
     end_ms = now_ms + (7 * 24 * 60 * 60 * 1000)
@@ -148,11 +151,28 @@ async def get_slots(calendar_type: str = "follow_up_b", timezone: str = OFFICE_T
         "timezone": timezone,
     }
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, params=params, headers=get_ghl_headers())
-        if resp.status_code == 200:
-            return {"status": "success", "available_slots": resp.json()}
-        return {"status": "error", "message": f"GHL slots API error: {resp.text}"}
+    last_error = None
+    for attempt in range(1, 4):  # 3 attempts
+        try:
+            async with httpx.AsyncClient(timeout=12) as client:
+                resp = await client.get(url, params=params, headers=get_ghl_headers())
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Validate response actually has slots
+                    if data:
+                        return {"status": "success", "available_slots": data}
+                    # Empty response — retry
+                    last_error = "GHL returned empty slots data"
+                else:
+                    last_error = f"GHL slots API error (attempt {attempt}): {resp.status_code} {resp.text[:200]}"
+        except Exception as e:
+            last_error = f"GHL slots request exception (attempt {attempt}): {e}"
+
+        if attempt < 3:
+            await _asyncio.sleep(1.5 * attempt)  # 1.5s, then 3s backoff
+
+    return {"status": "error", "message": f"Could not load available slots after 3 attempts. Please ask the caller to try again shortly. Detail: {last_error}"}
+
 
 
 async def book_appointment(

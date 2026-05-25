@@ -7,7 +7,7 @@ import websockets
 from database import SessionLocal
 from models.activity_models import CallLog
 from config import FORWARD_SIMON, FORWARD_TANZINA, FORWARD_ALEX, FORWARD_NAFI
-from services.known_clients import find_known_client_by_phone, profile_from_known_client
+from services.known_clients import find_known_client_by_phone, find_known_client_by_email, find_known_client_by_company, profile_from_known_client
 from services.openai_realtime import get_openai_realtime_model, get_openai_realtime_ws_url
 from routers.common_tools import (
     ADS,
@@ -667,10 +667,26 @@ async def twilio_stream(websocket: WebSocket):
                         - If they say NO/negative (no, wait, na, না, আরেকটু, etc.) → say "Of course, go ahead!" or "জি বলুন!" and CONTINUE the conversation. Do NOT call `end_call`. Do NOT ask permission again.
                         - If you cannot understand what they said → say "Sorry, I didn't catch that. Could you repeat?" or "Sorry, একটু আবার বলবেন?" — Do NOT ask for permission again.
                       CRITICAL: NEVER ask the permission question (Step 2) more than once per conversation flow. If the user already heard it and responded, move on accordingly.
+
+                    # NO REPETITIVE QUESTIONS (Issue 5)
+                    - The caller's phone number is ALREADY KNOWN: {caller_number}. NEVER ask for it again.
+                    - If the caller's email is already in the CRM profile (shown below), NEVER ask for it again. Instead, CONFIRM it: say "We have your email as [email] — should I use that?" and wait for YES/NO.
+                    - Only collect email from scratch if the CRM email field is blank/empty.
+                    - NEVER ask the caller for information that is already visible in the CRM profile below.
+
+                    # PAYMENT MODEL CLARIFICATION (Issue 5)
+                    - For paid appointments (virtual_cpa_45, office_cpa_45): the payment is NOT a separate fee. It is a PRE-PAYMENT that will be CREDITED towards their future invoice. Tell callers: "This payment will be credited towards your invoice — it's not an extra charge."
+                    - Bangla: "এই payment টা আপনার invoice-এ credit হয়ে যাবে — এটা আলাদা কোনো charge না।"
+
+                    # CLIENT RECOGNITION (Issue 8)
+                    - If the CRM profile shows a name (not "Prospect"), greet the caller by name and treat them as a recognized client.
+                    - Do NOT ask for their name, phone, or email if already in the CRM profile.
+                    - If the email field is populated: before sending any email or link, confirm: "I'll send that to [email] — is that still correct?"
+                    - If email is empty: politely ask once: "Could I get your email address to send the confirmation?"
                     
                     # CALLER CRM PROFILE
                     - Name: {contact_name}
-                    - Phone: {caller_number} (Note: Always confirm this number instead of asking for it. All clients are US-based with +1 prefix.)
+                    - Phone: {caller_number} (confirmed — do NOT ask for it)
                     - Client Type: {client_type}
                     - Group: {group}
                     - Contact ID: {contact_id}
@@ -910,6 +926,8 @@ async def twilio_stream(websocket: WebSocket):
         response_audio_sent_ms = 0
         interrupt_event = asyncio.Event()
         end_call_in_progress = [False]
+        # After a decline, block the AI's re-ask for 30s to prevent permission loop
+        end_call_blocked_until = [0.0]
 
         async def _hangup_after_consent():
             if end_call_in_progress[0] or call_done.is_set():
@@ -921,12 +939,13 @@ async def twilio_stream(websocket: WebSocket):
             except Exception:
                 pass
             try:
-                # Detect language from caller speech only — skip AI transcript entries
+                # Detect language from caller speech only, fallback to AI transcripts
+                # Fallback needed: callers in Bangla convos often say 'ok/yeah' at the end
                 is_bangla_convo = False
                 banglish_indicators = {"ami", "apne", "apnar", "tumi", "kemon", "accha", "acha", "thik", "kore", "korechi", "koren", "kete", "den", "din", "ji", "ha", "na", "bhai", "somossa", "rakhlam", "rakhchi", "allah", "hafez", "khoda"}
-                for entry in reversed(transcript_accumulator):
+                for entry in transcript_accumulator:
                     if not entry.startswith("Caller:"):
-                        continue  # Skip AI entries
+                        continue
                     text = entry[len("Caller:"):].strip()
                     if any('\u0980' <= char <= '\u09FF' for char in text):
                         is_bangla_convo = True
@@ -935,6 +954,16 @@ async def twilio_stream(websocket: WebSocket):
                     if any(w in banglish_indicators for w in words):
                         is_bangla_convo = True
                         break
+
+                # Fallback: if caller entries had no Bangla, check AI entries
+                if not is_bangla_convo:
+                    for entry in transcript_accumulator:
+                        if not entry.startswith("AI:"):
+                            continue
+                        ai_text = entry[len("AI:"):].strip()
+                        if any('\u0980' <= char <= '\u09FF' for char in ai_text):
+                            is_bangla_convo = True
+                            break
 
                 if is_bangla_convo:
                     goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
@@ -1077,8 +1106,13 @@ async def twilio_stream(websocket: WebSocket):
                         logger.info(f"\n🤖 [AI Reply]: {text}")
                         transcript_accumulator.append(f"AI: {text}")
                         if _asks_end_call_permission(text):
-                            call_close_state[0] = 1  # permission question was asked
-                            logger.info("📋 [EndCall] Permission question asked — waiting for caller response.")
+                            import time as _time
+                            if _time.time() < end_call_blocked_until[0]:
+                                # Still in cooldown after a decline — suppress the re-ask
+                                logger.info("🚫 [EndCall] AI tried to re-ask permission during cooldown — suppressed.")
+                            else:
+                                call_close_state[0] = 1
+                                logger.info("📋 [EndCall] Permission question asked — waiting for caller response.")
 
 
                 # Catch the user's speech transcript + detect caller goodbye
@@ -1101,9 +1135,11 @@ async def twilio_stream(websocket: WebSocket):
                                 logger.info("✅ [EndCall] Caller consented — hanging up.")
                                 asyncio.create_task(_hangup_after_consent())
                             elif is_negative:
-                                # Caller wants to continue — reset state, let AI continue conversation
+                                # Caller wants to continue — reset and block re-ask for 30s
+                                import time as _time
                                 call_close_state[0] = 0
-                                logger.info("↩️ [EndCall] Caller declined — resetting, continuing conversation.")
+                                end_call_blocked_until[0] = _time.time() + 30
+                                logger.info("↩️ [EndCall] Caller declined — resetting, continuing conversation (blocked for 30s).")
                             else:
                                 # Unclear response — AI will ask to repeat (no state change)
                                 logger.info("❓ [EndCall] Unclear response — AI will ask caller to repeat.")

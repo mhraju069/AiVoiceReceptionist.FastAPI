@@ -192,14 +192,30 @@ async def demo_voice_stream(websocket: WebSocket):
                             - If they say NO/negative (no, wait, na, না, আরেকটু, etc.) → say "Of course, go ahead!" or "জি বলুন!" and CONTINUE the conversation. Do NOT call `end_call`. Do NOT ask permission again.
                             - If you cannot understand what they said → say "Sorry, I didn't catch that. Could you repeat?" or "Sorry, একটু আবার বলবেন?" — Do NOT ask for permission again.
                           CRITICAL: NEVER ask the permission question (Step 2) more than once per conversation flow.
-                        
+
+                        # NO REPETITIVE QUESTIONS (Issue 5)
+                        - The caller's phone number is ALREADY KNOWN: {phone}. NEVER ask for it again.
+                        - If the caller's email is already in the CRM profile (shown below), NEVER ask for it again. Instead, CONFIRM it: say "We have your email as [email] — should I use that?" and wait for YES/NO.
+                        - Only collect email from scratch if the CRM email field is blank/empty.
+                        - NEVER ask the caller for information that is already visible in the CRM profile below.
+
+                        # PAYMENT MODEL CLARIFICATION (Issue 5)
+                        - For paid appointments (virtual_cpa_45, office_cpa_45): the payment is NOT a separate fee. It is a PRE-PAYMENT that will be CREDITED towards their future invoice. Tell callers: "This payment will be credited towards your invoice — it's not an extra charge."
+                        - Bangla: "এই payment টা আপনার invoice-এ credit হয়ে যাবে — এটা আলাদা কোনো charge না।"
+
+                        # CLIENT RECOGNITION (Issue 8)
+                        - If the CRM profile shows a name (not "Prospect"), greet the caller by name and treat them as a recognized client.
+                        - Do NOT ask for their name, phone, or email if already in the CRM profile.
+                        - If the email field is populated: before sending any email or link, confirm: "I'll send that to [email] — is that still correct?"
+                        - If email is empty: politely ask once: "Could I get your email address to send the confirmation?"
+
                         # CALLER CRM PROFILE
                         - Name: {contact_name}
-                        - Phone: {phone} (Note: Always confirm this number instead of asking for it. All clients are US-based with +1 prefix.)
+                        - Phone: {phone} (confirmed — do NOT ask for it)
                         - Client Type: {client_type}
                         - Group: {group}
                         - Contact ID: {contact_id}
-                        - Email: {email if email else 'Not Provided'}
+                        - Email: {email if email else 'Not on file — ask once if needed'}
                         - Business Name: {business_name if business_name else 'Not Provided'}
                         - Client Notes from CRM: {client_notes if client_notes else 'None'}
                         - Has Invoice Due: {invoice_due}
@@ -413,6 +429,8 @@ async def demo_voice_stream(websocket: WebSocket):
             last_assistant_item_id = None
             response_audio_sent_ms = 0
             end_call_in_progress = [False]
+            # After a decline, block the AI's re-ask for 30s to prevent permission loop
+            end_call_blocked_until = [0.0]
 
             async def _end_demo_after_consent():
                 if end_call_in_progress[0] or call_done.is_set():
@@ -424,10 +442,11 @@ async def demo_voice_stream(websocket: WebSocket):
                 except Exception:
                     pass
 
-                # Detect language from USER transcripts only (not AI transcripts)
+                # Detect language — check user transcripts first, then fall back to AI transcripts
+                # Fallback to AI transcripts needed when user says short English words (yeah/ok) in Bangla convos
                 is_bangla_convo = False
                 banglish_indicators = {"ami", "apne", "apnar", "tumi", "kemon", "accha", "acha", "thik", "kore", "korechi", "koren", "kete", "den", "din", "ji", "ha", "na", "bhai", "somossa", "rakhlam", "rakhchi", "allah", "hafez", "khoda"}
-                for entry in reversed(user_transcripts):
+                for entry in user_transcripts:
                     if any('\u0980' <= char <= '\u09FF' for char in entry):
                         is_bangla_convo = True
                         break
@@ -435,6 +454,14 @@ async def demo_voice_stream(websocket: WebSocket):
                     if any(w in banglish_indicators for w in words):
                         is_bangla_convo = True
                         break
+
+                # Fallback: if user transcripts had no Bangla, check AI transcripts
+                # If the AI was speaking Bangla, this is a Bangla conversation
+                if not is_bangla_convo:
+                    for ai_entry in ai_transcripts:
+                        if any('\u0980' <= char <= '\u09FF' for char in ai_entry):
+                            is_bangla_convo = True
+                            break
 
                 if is_bangla_convo:
                     goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
@@ -450,7 +477,7 @@ async def demo_voice_stream(websocket: WebSocket):
                         }
                     }))
                     await _debug("end_call_consent", f"✅ Caller gave end-call permission. Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then ending.")
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(8)
                 finally:
                     await _end_demo_call()
 
@@ -496,8 +523,13 @@ async def demo_voice_stream(websocket: WebSocket):
                         if text:
                             ai_transcripts.append(text)
                             if _asks_end_call_permission(text):
-                                call_close_state[0] = 1
-                                await _debug("end_call_state", "📋 Permission question asked — waiting for caller response.")
+                                import time as _time
+                                if _time.time() < end_call_blocked_until[0]:
+                                    # Still in cooldown after a decline — ignore this re-ask
+                                    await _debug("end_call_blocked", "🚫 AI tried to re-ask permission during cooldown — suppressed.")
+                                else:
+                                    call_close_state[0] = 1
+                                    await _debug("end_call_state", "📋 Permission question asked — waiting for caller response.")
                             await _debug("ai_transcript", f"🤖 AI: {text}")
                             await _send({"type": "transcript", "role": "assistant", "text": text})
 
@@ -521,8 +553,10 @@ async def demo_voice_stream(websocket: WebSocket):
                                     await _debug("end_call_consent", "✅ Caller consented — ending call.")
                                     asyncio.create_task(_end_demo_after_consent())
                                 elif is_negative:
+                                    import time as _time
                                     call_close_state[0] = 0
-                                    await _debug("end_call_declined", "↩️ Caller declined — resetting, continuing conversation.")
+                                    end_call_blocked_until[0] = _time.time() + 30  # Block re-ask for 30s
+                                    await _debug("end_call_declined", "↩️ Caller declined — resetting, continuing conversation (blocked for 30s).")
                                 else:
                                     await _debug("end_call_unclear", "❓ Unclear response — AI will ask caller to repeat.")
                             
