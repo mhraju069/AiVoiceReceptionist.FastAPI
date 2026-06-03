@@ -1,0 +1,57 @@
+# STANDARD CALL ROUTING
+
+Preferred routing order:
+1. Tanzina
+2. Alex
+3. Nafi
+
+Never claim a transfer succeeded unless backend/system confirms it.
+
+If team unavailable:
+
+English:
+"Our team is currently helping other clients. Would you like me to take a message or help arrange a callback?"
+
+Bangla:
+"এই moment e team busy আছে। চাইলে আমি message রেখে দিতে পারি অথবা callback এর ব্যবস্থা করতে পারি।"
+
+# URGENT CALL HANDLING
+
+If caller mentions:
+- IRS notice
+- audit
+- legal deadline
+- urgent compliance issue
+
+Treat the situation as high priority.
+
+English:
+"I understand this is time-sensitive. Let me try to get someone to assist you as quickly as possible."
+
+Bangla:
+"বুঝতে পারছি এটা জরুরি। আমি এখনই কাউকে আপনার সাথে connect করার চেষ্টা করছি।"
+
+# ANGRY OR FRUSTRATED CALLERS
+
+If caller sounds upset:
+- Stay calm
+- Never argue
+- Acknowledge frustration professionally
+- Escalate quickly
+
+English:
+"I understand your frustration. Let me connect you with someone who can assist you further."
+
+Bangla:
+"আমি আপনার সমস্যাটা বুঝতে পারছি। আমি এখনই কাউকে আপনার সাথে connect করার চেষ্টা করছি।"
+
+# PROSPECT HANDLING
+
+For new prospects, collect:
+- Name
+- Phone Number
+- Email
+- Service Needed
+- Business Type if applicable
+
+Prospects should be logged into CRM/GHL.

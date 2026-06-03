@@ -15,8 +15,11 @@ from services.rag_service import load_knowledge, save_knowledge
 from services.prompts import (
     load_full_prompt_template,
     load_greetings,
+    load_section,
+    list_sections,
     save_full_prompt_template,
     save_greetings,
+    save_section,
 )
 from services.known_clients import (
     delete_known_client,
@@ -304,48 +307,136 @@ def admin_save_company(
 
 @router.get("/prompts", response_class=HTMLResponse, include_in_schema=False)
 def admin_prompts(
+    tab: Optional[str] = None,
     saved: Optional[str] = None,
     error: Optional[str] = None,
     current_user: User = Depends(get_admin_user),
 ):
-    greetings_text = "\n".join(load_greetings())
-    prompt_template = load_full_prompt_template()
-    saved_html = '<div class="panel" style="border-color:#99d6c9;color:#0f766e;">Prompt settings saved. New AI calls will use the updated prompt and greetings.</div>' if saved else ""
+    sections = list_sections()
+    active_tab = tab or "greetings"
+
+    saved_html = '<div class="panel" style="border-color:#99d6c9;color:#0f766e;">Saved successfully. New AI calls will use the updated prompt.</div>' if saved else ""
     error_html = f'<div class="panel error">{_e(error)}</div>' if error else ""
+
+    # --- Build tab buttons ---
+    def tab_btn(key: str, label: str) -> str:
+        is_active = active_tab == key
+        style = "background:var(--accent);color:white;" if is_active else "background:#f0f2f5;color:var(--text);"
+        return f'<a href="/admin/prompts?tab={key}" class="button" style="{style};font-weight:600;text-decoration:none;">{label}</a>'
+
+    tab_buttons = tab_btn("greetings", "Greetings")
+    for s in sections:
+        num = s["filename"].split("_")[0]  # e.g. "01"
+        tab_buttons += "\n" + tab_btn(s["filename"], f"{num}. {s['label']}")
+
+    # --- Build active panel content ---
+    if active_tab == "greetings":
+        greetings_text = "\n".join(load_greetings())
+        panel = f"""
+        <section class="panel">
+          <div class="toolbar">
+            <div>
+              <h2>Greetings</h2>
+              <p class="muted" style="margin:4px 0 0;">One greeting per line. Reba randomly picks one at the start of each call.</p>
+            </div>
+          </div>
+          <form method="post" action="/admin/prompts/greetings">
+            <label>Greetings
+              <textarea name="greetings" style="min-height:220px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.55;" required>{_e(greetings_text)}</textarea>
+            </label>
+            <br>
+            <button type="submit">Save Greetings</button>
+          </form>
+        </section>
+        """
+    else:
+        # Find section metadata
+        section_meta = next((s for s in sections if s["filename"] == active_tab), None)
+        if section_meta is None:
+            panel = '<div class="panel error">Unknown section.</div>'
+        else:
+            content = load_section(active_tab)
+            has_placeholders = any(
+                ph in content for ph in ["{current_time}", "{office_timezone}", "{selected_greeting}", "{knowledge}"]
+            )
+            placeholder_note = ""
+            if has_placeholders:
+                placeholder_note = """
+              <p class="muted" style="margin:8px 0 0;">
+                Available placeholders:
+                <code>{current_time}</code>,
+                <code>{office_timezone}</code>,
+                <code>{selected_greeting}</code>,
+                <code>{knowledge}</code>.
+              </p>"""
+            panel = f"""
+        <section class="panel">
+          <div class="toolbar">
+            <div>
+              <h2>{_e(section_meta['label'])}</h2>
+              <p class="muted" style="margin:4px 0 0;">File: <code>data/prompt_sections/{_e(active_tab)}</code> &nbsp;·&nbsp; {section_meta['size']:,} bytes</p>
+            </div>
+          </div>
+          <form method="post" action="/admin/prompts/section">
+            <input type="hidden" name="filename" value="{_e(active_tab)}">
+            <label>Content
+              <textarea name="content" style="min-height:620px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.55;" required>{_e(content)}</textarea>
+            </label>
+            {placeholder_note}
+            <br>
+            <button type="submit">Save Section</button>
+          </form>
+        </section>
+        """
+
     body = f"""
     {saved_html}
     {error_html}
-    <section class="panel">
-      <div class="toolbar">
-        <div>
-          <h2>Greetings And Full Prompt</h2>
-          <p class="muted" style="margin:4px 0 0;">Edit one greeting per line. The AI randomly chooses one for new prospect calls.</p>
-        </div>
+    <section class="panel" style="padding:14px;">
+      <h2 style="margin:0 0 12px;">Prompt Sections</h2>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+        {tab_buttons}
       </div>
-      <form method="post" action="/admin/prompts">
-        <label>Greetings
-          <textarea name="greetings" style="min-height:180px;font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;line-height:1.45;" required>{_e(greetings_text)}</textarea>
-        </label>
-        <br>
-        <label>Full Prompt Template
-          <textarea name="prompt_template" style="min-height:720px;font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;line-height:1.45;" required>{_e(prompt_template)}</textarea>
-        </label>
-        <p class="muted">
-          Available placeholders:
-          <code>{{current_time}}</code>,
-          <code>{{office_timezone}}</code>,
-          <code>{{selected_greeting}}</code>,
-          <code>{{knowledge}}</code>.
-        </p>
-        <button type="submit">Save Prompt Settings</button>
-      </form>
     </section>
+    {panel}
     """
     return _admin_layout("Prompts", body, current_user)
 
 
+@router.post("/prompts/greetings", include_in_schema=False)
+def admin_save_greetings(
+    greetings: str = Form(...),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        save_greetings(greetings)
+    except ValueError as exc:
+        return RedirectResponse(
+            f"/admin/prompts?tab=greetings&error={quote(str(exc))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    return RedirectResponse("/admin/prompts?tab=greetings&saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/prompts/section", include_in_schema=False)
+def admin_save_section(
+    filename: str = Form(...),
+    content: str = Form(...),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        save_section(filename, content)
+    except ValueError as exc:
+        return RedirectResponse(
+            f"/admin/prompts?tab={quote(filename)}&error={quote(str(exc))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    return RedirectResponse(f"/admin/prompts?tab={quote(filename)}&saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+# Legacy single-form POST kept for backwards compat (redirects to new flow)
 @router.post("/prompts", include_in_schema=False)
-def admin_save_prompts(
+def admin_save_prompts_legacy(
     greetings: str = Form(...),
     prompt_template: str = Form(...),
     current_user: User = Depends(get_admin_user),
