@@ -281,7 +281,7 @@ def admin_company(
       <div class="toolbar">
         <div>
           <h2>Company Data For AI</h2>
-          <p class="muted" style="margin:4px 0 0;">This is the source of truth Reba uses for company details, services, staff, pricing policy, office hours, booking rules, and FAQs.</p>
+          <p class="muted" style="margin:4px 0 0;">This is the source of truth রেবা uses for company details, services, staff, pricing policy, office hours, booking rules, and FAQs.</p>
         </div>
       </div>
       <form method="post" action="/admin/company">
@@ -337,7 +337,7 @@ def admin_prompts(
           <div class="toolbar">
             <div>
               <h2>Greetings</h2>
-              <p class="muted" style="margin:4px 0 0;">One greeting per line. Reba randomly picks one at the start of each call.</p>
+              <p class="muted" style="margin:4px 0 0;">One greeting per line. রেবা randomly picks one at the start of each call.</p>
             </div>
           </div>
           <form method="post" action="/admin/prompts/greetings">

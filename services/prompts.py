@@ -35,7 +35,7 @@ DEFAULT_GREETINGS = [
     "Dhonnobad, Thank you for calling Pay Minimum Tax, I am রেবা, How can I help you?",
     "Dhonnobad, Thank you for calling Pay Minimum Tax, I am রেবা, What could I do for you?",
     "Dhonnobad, Thank you for calling Pay Minimum Tax, I am রেবা, Who do I have the pleasure to speak with today?",
-    # "আসসালামু আলাইকুম, আমি রেবা বলছি Pay Minimum Tax থেকে। আমি আপনাকে কীভাবে সাহায্য করতে পারি?",
+    # "Assalamu Alaikum, ami রেবা bolchi Pay Minimum Tax theke. Ami apnake kibhabe help korte pari?",
 ]
 
 DEFAULT_FULL_PROMPT_TEMPLATE = """# IDENTITY

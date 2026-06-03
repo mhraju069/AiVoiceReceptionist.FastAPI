@@ -183,7 +183,7 @@ def _is_end_call_consent(text: str) -> bool:
 # Words/phrases that mean "No" / "I want to continue" in English, Banglish, or Bangla
 _NEGATIVE_WORDS = {
     "no", "nope", "nah", "na", "not", "never",
-    "না", "নাহ", "নো",
+    "না", "নাহ", "নো", "ma", "mha",
 }
 _NEGATIVE_PHRASES = (
     "no thank", "not yet", "i have", "actually", "wait", "hold on",
@@ -655,18 +655,20 @@ async def twilio_stream(websocket: WebSocket):
                     - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
                     - NEVER switch to any other language.
                     - If you are not sure if the caller is speaking to you, stay silent.
-                    - CALL ENDING FLOW (follow exactly, in order):
-                      STEP 1 — After completing any task, ask naturally if they need more help:
-                        English: "Is there anything else I can help you with?" (vary wording each time)
-                        Bangla: "আর কোনো সাহায্য করতে পারি?" (vary wording each time)
-                      STEP 2 — If they say NO (no, nah, nope, না, নাহ, that's all, আর লাগবে না, etc.) — ask permission ONCE:
+                    - CALL ENDING FLOW (follow exactly):
+                      STEP 1 — After completing any task, ask if they need more help:
+                        English: "Is there anything else I can help you with?" (vary wording)
+                        Banglish: "Ar kono help lagbe?" or "Ar kono shahayta korte pari?" (vary wording)
+                      STEP 2 — If they say NO — ask permission ONCE:
                         English: "Okay, can I go ahead and end the call now?"
-                        Bangla: "ঠিক আছে, আমি কি তাহলে call টা শেষ করে দিই?"
-                      STEP 3 — Wait for their response to the permission question:
-                        - If they say YES/positive (yes, ok, sure, ji, হ্যাঁ, জি, কাটো, etc.) → say goodbye in the SAME language, then call `end_call`.
-                        - If they say NO/negative (no, wait, na, না, আরেকটু, etc.) → say "Of course, go ahead!" or "জি বলুন!" and CONTINUE the conversation. Do NOT call `end_call`. Do NOT ask permission again.
-                        - If you cannot understand what they said → say "Sorry, I didn't catch that. Could you repeat?" or "Sorry, একটু আবার বলবেন?" — Do NOT ask for permission again.
-                      CRITICAL: NEVER ask the permission question (Step 2) more than once per conversation flow. If the user already heard it and responded, move on accordingly.
+                        Banglish: "Thik ache, ami ki tahole call ta shesh kore dii?"
+                      STEP 3 — Wait for their YES or NO:
+                        - YES (yes, ok, sure, ji, haan, acha, kato, etc.) → say a SHORT goodbye then call end_call.
+                          Banglish goodbye: "Dhonnobad, bhalo thakben. Khoda Hafez."
+                          English goodbye: "Thank you for calling, goodbye! Have a great day."
+                        - NO (no, wait, na, arektu, etc.) → say "Ji bolun!" or "Of course, go ahead!" and CONTINUE. Do NOT call end_call.
+                        - UNCLEAR → say "Sorry, ektu abar bolben?" Do NOT ask permission again.
+                      CRITICAL: NEVER ask the permission question more than once per flow. If already asked, do not repeat it. If the user already heard it and responded, move on accordingly.
 
                     # NO REPETITIVE QUESTIONS (Issue 5)
                     - The caller's phone number is ALREADY KNOWN: {caller_number}. NEVER ask for it again.
@@ -676,7 +678,7 @@ async def twilio_stream(websocket: WebSocket):
 
                     # PAYMENT MODEL CLARIFICATION (Issue 5)
                     - For paid appointments (virtual_cpa_45, office_cpa_45): the payment is NOT a separate fee. It is a PRE-PAYMENT that will be CREDITED towards their future invoice. Tell callers: "This payment will be credited towards your invoice — it's not an extra charge."
-                    - Bangla: "এই payment টা আপনার invoice-এ credit হয়ে যাবে — এটা আলাদা কোনো charge না।"
+                    - Banglish: "Ei payment ta apnar invoice-e credit hoye jabe — eta alada kono charge na."
 
                     # CLIENT RECOGNITION (Issue 8)
                     - If the CRM profile shows a name (not "Prospect"), greet the caller by name and treat them as a recognized client.
@@ -701,13 +703,16 @@ async def twilio_stream(websocket: WebSocket):
                             "format": {"type": "audio/pcmu"},
                             "transcription": {
                                 "model": "whisper-1"
+                                # NOTE: Do NOT set "language" here. Callers speak Banglish
+                                # (romanized Bengali in Latin script). Forcing "bn" causes
+                                # Whisper to drop transcripts entirely for mixed speech.
                             },
                             # Auto-detect when the caller finishes speaking and trigger a response
                             "turn_detection": {
                                 "type": "server_vad",
-                                "threshold": 0.85,
-                                "prefix_padding_ms": 300,
-                                "silence_duration_ms": 600,
+                                "threshold": 0.65,        # lower = less likely to fire on partial speech/pauses
+                                "prefix_padding_ms": 400, # capture start of speech more reliably
+                                "silence_duration_ms": 800, # wait longer before treating silence as turn-end (especially for Bangla)
                             },
                         },
                         "output": {
@@ -934,41 +939,68 @@ async def twilio_stream(websocket: WebSocket):
                 return
             end_call_in_progress[0] = True
             call_close_state[0] = 0
+            # Block orphaned audio immediately BEFORE cancelling — prevents a race
+            # where the old in-flight response plays before the goodbye override lands
+            interrupt_event.set()
             try:
                 await openai_ws.send(json.dumps({"type": "response.cancel"}))
             except Exception:
                 pass
             try:
-                # Detect language from caller speech only, fallback to AI transcripts
-                # Fallback needed: callers in Bangla convos often say 'ok/yeah' at the end
+                # Detect conversation language: check caller transcripts first,
+                # then AI transcripts as fallback.
+                # A score >= 2 from Banglish indicators counts as Bangla conversation.
                 is_bangla_convo = False
-                banglish_indicators = {"ami", "apne", "apnar", "tumi", "kemon", "accha", "acha", "thik", "kore", "korechi", "koren", "kete", "den", "din", "ji", "ha", "na", "bhai", "somossa", "rakhlam", "rakhchi", "allah", "hafez", "khoda"}
+                bangla_score = 0
+                banglish_indicators = {
+                    # Responses / affirmatives
+                    "ji", "jee", "jii", "ha", "haan", "hya", "acha", "accha", "thik",
+                    # Negatives / continuations
+                    "na", "nah", "nei",
+                    # Common Bangla conversation words (romanized)
+                    "ami", "apne", "apnar", "apnake", "tumi", "amar", "amra",
+                    "kemon", "kore", "korechi", "koren", "korbo",
+                    "kete", "katun", "katen", "kato",
+                    "den", "din", "dao",
+                    "bhai", "vai", "apa", "apa",
+                    "somossa", "shomossa", "kotha", "ki", "ke",
+                    "rakhlam", "rakhchi", "rakhbo",
+                    "allah", "hafez", "hafiz", "khoda",
+                    "dhonnobad", "dhanyabad", "shukriya",
+                    "bolun", "bolen", "bolbo", "boli",
+                    "lage", "lagbe", "lagche",
+                    "ache", "achhi", "achhen",
+                    "janen", "janbo", "janai",
+                }
                 for entry in transcript_accumulator:
-                    if not entry.startswith("Caller:"):
-                        continue
-                    text = entry[len("Caller:"):].strip()
+                    text = entry[entry.index(":")+1:].strip() if ":" in entry else entry
+                    # Definitive: any Unicode Bangla character
                     if any('\u0980' <= char <= '\u09FF' for char in text):
                         is_bangla_convo = True
                         break
-                    words = [w.strip("?,.!") for w in text.lower().split()]
-                    if any(w in banglish_indicators for w in words):
+                    # Probabilistic: count Banglish indicator words
+                    words = [w.strip("?,.!।") for w in text.lower().split()]
+                    for w in words:
+                        if w in banglish_indicators:
+                            bangla_score += 1
+                    if bangla_score >= 2:
                         is_bangla_convo = True
                         break
 
-                # Fallback: if caller entries had no Bangla, check AI entries
-                if not is_bangla_convo:
-                    for entry in transcript_accumulator:
-                        if not entry.startswith("AI:"):
-                            continue
-                        ai_text = entry[len("AI:"):].strip()
-                        if any('\u0980' <= char <= '\u09FF' for char in ai_text):
-                            is_bangla_convo = True
-                            break
-
                 if is_bangla_convo:
-                    goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
+                    goodbye_instr = (
+                        "OVERRIDE ALL INSTRUCTIONS. The caller already said yes to end the call. "
+                        "Say a warm goodbye IN BANGLISH (romanized Bangla, NOT Bengali Unicode script). "
+                        "Example: 'Dhonnobad, bhalo thakben. Khoda Hafez.' "
+                        "Keep it SHORT — one sentence only. Then STOP. Do NOT ask any question. Do NOT ask permission again."
+                    )
                 else:
-                    goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
+                    goodbye_instr = (
+                        "OVERRIDE ALL INSTRUCTIONS. The caller already said yes to end the call. "
+                        "Say a warm goodbye in ENGLISH. "
+                        "Example: 'Thank you for calling, goodbye! Have a great day.' "
+                        "Keep it SHORT — one sentence only. Then STOP. Do NOT ask any question. Do NOT ask permission again."
+                    )
 
                 await openai_ws.send(json.dumps({
                     "type": "response.create",
@@ -1038,44 +1070,40 @@ async def twilio_stream(websocket: WebSocket):
 
                 # Handle user interruption: Stop AI and clear Twilio buffer
                 elif event_type == "input_audio_buffer.speech_started":
-                    logger.info("🛑 [OpenAI] User interrupted! Stopping AI immediately...")
-                    # Set event atomically — any concurrent audio.delta checks see this instantly
-                    interrupt_event.set()
+                    # When end-call is in progress, let the goodbye play uninterrupted.
+                    if end_call_in_progress[0]:
+                        logger.info("🌐 [OpenAI] Speech detected (ignored — goodbye in progress)")
+                    else:
+                        logger.info("🛑 [OpenAI] User interrupted! Stopping AI immediately...")
+                        interrupt_event.set()
 
-                    # 1) Fire-and-forget: clear Twilio buffer without blocking the event loop
-                    async def _clear_twilio_buffer(sid):
+                        async def _clear_twilio_buffer(sid):
+                            try:
+                                await websocket.send_text(json.dumps({"event": "clear", "streamSid": sid}))
+                                logger.info("🧹 [Twilio] Cleared audio playback buffer.")
+                            except Exception as e:
+                                logger.error(f"🔴 [Twilio] Failed to clear buffer: {e}")
+
+                        if stream_sid:
+                            asyncio.create_task(_clear_twilio_buffer(stream_sid))
+
                         try:
-                            await websocket.send_text(json.dumps({
-                                "event": "clear",
-                                "streamSid": sid
-                            }))
-                            logger.info("🧹 [Twilio] Cleared audio playback buffer.")
-                        except Exception as e:
-                            logger.error(f"🔴 [Twilio] Failed to clear buffer: {e}")
+                            await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                            logger.info("🛑 [OpenAI] Sent response.cancel to stop AI generation.")
+                        except Exception as cancel_err:
+                            logger.error(f"🔴 [OpenAI] Failed to send response.cancel: {cancel_err}")
 
-                    if stream_sid:
-                        asyncio.create_task(_clear_twilio_buffer(stream_sid))
-
-                    # 2) Cancel the current OpenAI response generation
-                    try:
-                        await openai_ws.send(json.dumps({"type": "response.cancel"}))
-                        logger.info("🛑 [OpenAI] Sent response.cancel to stop AI generation.")
-                    except Exception as cancel_err:
-                        logger.error(f"🔴 [OpenAI] Failed to send response.cancel: {cancel_err}")
-
-                    # 3) Truncate the conversation so OpenAI only remembers what
-                    #    the caller actually heard (not the full unplayed response)
-                    if last_assistant_item_id:
-                        try:
-                            await openai_ws.send(json.dumps({
-                                "type": "conversation.item.truncate",
-                                "item_id": last_assistant_item_id,
-                                "content_index": 0,
-                                "audio_end_ms": int(response_audio_sent_ms)
-                            }))
-                            logger.info(f"✂️ [OpenAI] Truncated item at {int(response_audio_sent_ms)}ms")
-                        except Exception as trunc_err:
-                            logger.error(f"🔴 [OpenAI] Failed to truncate: {trunc_err}")
+                        if last_assistant_item_id:
+                            try:
+                                await openai_ws.send(json.dumps({
+                                    "type": "conversation.item.truncate",
+                                    "item_id": last_assistant_item_id,
+                                    "content_index": 0,
+                                    "audio_end_ms": int(response_audio_sent_ms)
+                                }))
+                                logger.info(f"✂️ [OpenAI] Truncated item at {int(response_audio_sent_ms)}ms")
+                            except Exception as trunc_err:
+                                logger.error(f"🔴 [OpenAI] Failed to truncate: {trunc_err}")
 
                 elif event_type == "input_audio_buffer.speech_stopped":
                     logger.info("🔇 [OpenAI] Speech ended, waiting for transcript check...")
@@ -1110,6 +1138,9 @@ async def twilio_stream(websocket: WebSocket):
                             if _time.time() < end_call_blocked_until[0]:
                                 # Still in cooldown after a decline — suppress the re-ask
                                 logger.info("🚫 [EndCall] AI tried to re-ask permission during cooldown — suppressed.")
+                            elif end_call_in_progress[0]:
+                                # End-call already triggered — ignore duplicate permission transcript
+                                logger.info("🚫 [EndCall] End-call already in progress — ignoring duplicate permission transcript.")
                             else:
                                 call_close_state[0] = 1
                                 logger.info("📋 [EndCall] Permission question asked — waiting for caller response.")
@@ -1131,15 +1162,20 @@ async def twilio_stream(websocket: WebSocket):
                             # Permission question was asked — evaluate the caller's response
                             is_consent = _is_end_call_consent(user_text)
                             is_negative = _is_negative_response(user_text)
-                            if is_consent:
-                                logger.info("✅ [EndCall] Caller consented — hanging up.")
-                                asyncio.create_task(_hangup_after_consent())
-                            elif is_negative:
+                            if is_negative:
                                 # Caller wants to continue — reset and block re-ask for 30s
                                 import time as _time
                                 call_close_state[0] = 0
                                 end_call_blocked_until[0] = _time.time() + 30
                                 logger.info("↩️ [EndCall] Caller declined — resetting, continuing conversation (blocked for 30s).")
+                            elif is_consent:
+                                logger.info("✅ [EndCall] Caller consented — hanging up.")
+                                # Reset state IMMEDIATELY (synchronously) before creating the
+                                # async task — prevents the race where the old AI transcript
+                                # re-arms call_close_state=1 before the task clears it
+                                call_close_state[0] = 0
+                                end_call_in_progress[0] = True
+                                asyncio.create_task(_hangup_after_consent())
                             else:
                                 # Unclear response — AI will ask to repeat (no state change)
                                 logger.info("❓ [EndCall] Unclear response — AI will ask caller to repeat.")
@@ -1163,6 +1199,17 @@ async def twilio_stream(websocket: WebSocket):
                                 "output": json.dumps(result)
                             }
                         }))
+                        if result.get("status") == "office_closed":
+                            await openai_ws.send(json.dumps({
+                                "type": "response.create",
+                                "response": {
+                                    "instructions": (
+                                        "CRITICAL: Respond in the EXACT SAME language (English or Bangla/Banglish) "
+                                        "that the caller has been using throughout this conversation. "
+                                        "Do not repeat yourself."
+                                    )
+                                }
+                            }))
                         continue
 
                     elif func_name == "book_appointment":
@@ -1210,8 +1257,18 @@ async def twilio_stream(websocket: WebSocket):
                             "output": json.dumps(result)
                         }
                     }))
-                    # Trigger response
-                    await openai_ws.send(json.dumps({"type": "response.create"}))
+                    # Trigger response — with language enforcement so AI never switches
+                    # language after a tool call returns an English-language result
+                    await openai_ws.send(json.dumps({
+                        "type": "response.create",
+                        "response": {
+                            "instructions": (
+                                "CRITICAL: Respond in the EXACT SAME language (English or Bangla/Banglish) "
+                                "that the caller has been using throughout this conversation. "
+                                "DO NOT switch to English just because the tool result is in English."
+                            )
+                        }
+                    }))
 
         except Exception as e:
             logger.info(f"🔴 [OpenAI -> Twilio] Error streaming response from OpenAI to Twilio: {e}")

@@ -180,18 +180,20 @@ async def demo_voice_stream(websocket: WebSocket):
                         - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
                         - NEVER switch to any other language.
                         - If you are not sure if the caller is speaking to you, stay silent.
-                        - CALL ENDING FLOW (follow exactly, in order):
-                          STEP 1 — After completing any task, ask naturally if they need more help:
-                            English: "Is there anything else I can help you with?" (vary wording each time)
-                            Bangla: "আর কোনো সাহায্য করতে পারি?" (vary wording each time)
-                          STEP 2 — If they say NO (no, nah, nope, না, নাহ, that's all, আর লাগবে না, etc.) — ask permission ONCE:
+                        - CALL ENDING FLOW (follow exactly):
+                          STEP 1 — After completing any task, ask if they need more help:
+                            English: "Is there anything else I can help you with?" (vary wording)
+                            Banglish: "Ar kono help lagbe?" or "Ar kono shahayta korte pari?" (vary wording)
+                          STEP 2 — If they say NO — ask permission ONCE:
                             English: "Okay, can I go ahead and end the call now?"
-                            Bangla: "ঠিক আছে, আমি কি তাহলে call টা শেষ করে দিই?"
-                          STEP 3 — Wait for their response to the permission question:
-                            - If they say YES/positive (yes, ok, sure, ji, হ্যাঁ, জি, কাটো, etc.) → say goodbye in the SAME language, then call `end_call`.
-                            - If they say NO/negative (no, wait, na, না, আরেকটু, etc.) → say "Of course, go ahead!" or "জি বলুন!" and CONTINUE the conversation. Do NOT call `end_call`. Do NOT ask permission again.
-                            - If you cannot understand what they said → say "Sorry, I didn't catch that. Could you repeat?" or "Sorry, একটু আবার বলবেন?" — Do NOT ask for permission again.
-                          CRITICAL: NEVER ask the permission question (Step 2) more than once per conversation flow.
+                            Banglish: "Thik ache, ami ki tahole call ta shesh kore dii?"
+                          STEP 3 — Wait for their YES or NO:
+                            - YES (yes, ok, sure, ji, haan, acha, kato, etc.) → say a SHORT goodbye then call end_call.
+                              Banglish goodbye: "Dhonnobad, bhalo thakben. Khoda Hafez."
+                              English goodbye: "Thank you for calling, goodbye! Have a great day."
+                            - NO (no, wait, na, arektu, etc.) → say "Ji bolun!" or "Of course, go ahead!" and CONTINUE. Do NOT call end_call.
+                            - UNCLEAR → say "Sorry, ektu abar bolben?" Do NOT ask permission again.
+                          CRITICAL: NEVER ask the permission question more than once per flow. If already asked, do not repeat it. If the user already heard it and responded, move on accordingly.
 
                         # NO REPETITIVE QUESTIONS (Issue 5)
                         - The caller's phone number is ALREADY KNOWN: {phone}. NEVER ask for it again.
@@ -201,7 +203,7 @@ async def demo_voice_stream(websocket: WebSocket):
 
                         # PAYMENT MODEL CLARIFICATION (Issue 5)
                         - For paid appointments (virtual_cpa_45, office_cpa_45): the payment is NOT a separate fee. It is a PRE-PAYMENT that will be CREDITED towards their future invoice. Tell callers: "This payment will be credited towards your invoice — it's not an extra charge."
-                        - Bangla: "এই payment টা আপনার invoice-এ credit হয়ে যাবে — এটা আলাদা কোনো charge না।"
+                        - Banglish: "Ei payment ta apnar invoice-e credit hoye jabe — eta alada kono charge na."
 
                         # CLIENT RECOGNITION (Issue 8)
                         - If the CRM profile shows a name (not "Prospect"), greet the caller by name and treat them as a recognized client.
@@ -223,12 +225,17 @@ async def demo_voice_stream(websocket: WebSocket):
                         "audio": {
                             "input": {
                                 "format": {"type": "audio/pcm", "rate": 24000},
-                                "transcription": {"model": "whisper-1"},
+                                "transcription": {
+                                    "model": "whisper-1"
+                                    # NOTE: Do NOT set "language" here. Callers speak Banglish
+                                    # (romanized Bengali in Latin script). Forcing "bn" causes
+                                    # Whisper to drop transcripts entirely for mixed speech.
+                                },
                                 "turn_detection": {
                                     "type": "server_vad",
-                                    "threshold": 0.85,
-                                    "prefix_padding_ms": 300,
-                                    "silence_duration_ms": 600
+                                    "threshold": 0.65,        # lower = less likely to fire on mid-sentence pauses
+                                    "prefix_padding_ms": 400, # capture start of speech more reliably
+                                    "silence_duration_ms": 800 # longer wait — Bangla speech has natural mid-sentence pauses
                                 },
                             },
                             "output": {
@@ -437,36 +444,67 @@ async def demo_voice_stream(websocket: WebSocket):
                     return
                 end_call_in_progress[0] = True
                 call_close_state[0] = 0
+                # Block orphaned audio immediately BEFORE cancelling — prevents a race
+                # where the old in-flight response fires before the goodbye override lands
+                interrupt_event.set()
                 try:
                     await openai_ws.send(json.dumps({"type": "response.cancel"}))
                 except Exception:
                     pass
 
-                # Detect language — check user transcripts first, then fall back to AI transcripts
-                # Fallback to AI transcripts needed when user says short English words (yeah/ok) in Bangla convos
+                # Detect conversation language from all transcripts.
+                # Score-based: >= 2 Banglish indicator words = Bangla conversation.
                 is_bangla_convo = False
-                banglish_indicators = {"ami", "apne", "apnar", "tumi", "kemon", "accha", "acha", "thik", "kore", "korechi", "koren", "kete", "den", "din", "ji", "ha", "na", "bhai", "somossa", "rakhlam", "rakhchi", "allah", "hafez", "khoda"}
-                for entry in user_transcripts:
+                bangla_score = 0
+                banglish_indicators = {
+                    # Responses / affirmatives
+                    "ji", "jee", "jii", "ha", "haan", "hya", "acha", "accha", "thik",
+                    # Negatives / continuations
+                    "na", "nah", "nei",
+                    # Common Bangla conversation words (romanized)
+                    "ami", "apne", "apnar", "apnake", "tumi", "amar", "amra",
+                    "kemon", "kore", "korechi", "koren", "korbo",
+                    "kete", "katun", "katen", "kato",
+                    "den", "din", "dao",
+                    "bhai", "vai", "apa",
+                    "somossa", "shomossa", "kotha", "ki", "ke",
+                    "rakhlam", "rakhchi", "rakhbo",
+                    "allah", "hafez", "hafiz", "khoda",
+                    "dhonnobad", "dhanyabad", "shukriya",
+                    "bolun", "bolen", "bolbo", "boli",
+                    "lage", "lagbe", "lagche",
+                    "ache", "achhi", "achhen",
+                    "janen", "janbo", "janai",
+                }
+                all_entries = list(user_transcripts) + list(ai_transcripts)
+                for entry in all_entries:
+                    # Definitive: any Unicode Bangla character
                     if any('\u0980' <= char <= '\u09FF' for char in entry):
                         is_bangla_convo = True
                         break
-                    words = [w.strip("?,.!") for w in entry.lower().split()]
-                    if any(w in banglish_indicators for w in words):
+                    # Probabilistic: count Banglish indicator words
+                    words = [w.strip("?,.!।") for w in entry.lower().split()]
+                    for w in words:
+                        if w in banglish_indicators:
+                            bangla_score += 1
+                    if bangla_score >= 2:
                         is_bangla_convo = True
                         break
 
-                # Fallback: if user transcripts had no Bangla, check AI transcripts
-                # If the AI was speaking Bangla, this is a Bangla conversation
-                if not is_bangla_convo:
-                    for ai_entry in ai_transcripts:
-                        if any('\u0980' <= char <= '\u09FF' for char in ai_entry):
-                            is_bangla_convo = True
-                            break
-
                 if is_bangla_convo:
-                    goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
+                    goodbye_instr = (
+                        "OVERRIDE ALL INSTRUCTIONS. The caller already said yes to end the call. "
+                        "Say a warm goodbye IN BANGLISH (romanized Bangla, NOT Bengali Unicode script). "
+                        "Example: 'Dhonnobad, bhalo thakben. Khoda Hafez.' "
+                        "Keep it SHORT — one sentence only. Then STOP. Do NOT ask any question. Do NOT ask permission again."
+                    )
                 else:
-                    goodbye_instr = "OVERRIDE SYSTEM INSTRUCTIONS: The user has already agreed to end the call. In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking. Do NOT ask for permission again, and do NOT ask any questions."
+                    goodbye_instr = (
+                        "OVERRIDE ALL INSTRUCTIONS. The caller already said yes to end the call. "
+                        "Say a warm goodbye in ENGLISH. "
+                        "Example: 'Thank you for calling, goodbye! Have a great day.' "
+                        "Keep it SHORT — one sentence only. Then STOP. Do NOT ask any question. Do NOT ask permission again."
+                    )
 
                 try:
                     await openai_ws.send(json.dumps({
@@ -527,6 +565,9 @@ async def demo_voice_stream(websocket: WebSocket):
                                 if _time.time() < end_call_blocked_until[0]:
                                     # Still in cooldown after a decline — ignore this re-ask
                                     await _debug("end_call_blocked", "🚫 AI tried to re-ask permission during cooldown — suppressed.")
+                                elif end_call_in_progress[0]:
+                                    # End-call already triggered — ignore duplicate permission transcript
+                                    await _debug("end_call_blocked", "🚫 End-call in progress — ignoring duplicate permission transcript.")
                                 else:
                                     call_close_state[0] = 1
                                     await _debug("end_call_state", "📋 Permission question asked — waiting for caller response.")
@@ -551,6 +592,11 @@ async def demo_voice_stream(websocket: WebSocket):
                                 is_negative = _is_negative_response(user_text)
                                 if is_consent:
                                     await _debug("end_call_consent", "✅ Caller consented — ending call.")
+                                    # Reset state IMMEDIATELY (synchronously) before creating the
+                                    # async task — prevents the race where the old AI transcript
+                                    # re-arms call_close_state=1 before the task clears it
+                                    call_close_state[0] = 0
+                                    end_call_in_progress[0] = True
                                     asyncio.create_task(_end_demo_after_consent())
                                 elif is_negative:
                                     import time as _time
@@ -562,34 +608,35 @@ async def demo_voice_stream(websocket: WebSocket):
                             
 
                     elif evt == "input_audio_buffer.speech_started":
-                        await _debug("vad_speech_started", "🎤 Speech detected — interrupting AI...")
-                        # Set atomically — any concurrent audio.delta checks see this instantly
-                        interrupt_event.set()
+                        # When end-call is in progress, let the goodbye play uninterrupted.
+                        # Cancelling it here causes the call to hang instead of ending cleanly.
+                        if end_call_in_progress[0]:
+                            await _debug("vad_speech_started", "🌐 Speech detected (ignored — goodbye in progress)")
+                        else:
+                            await _debug("vad_speech_started", "🎤 Speech detected — interrupting AI...")
+                            interrupt_event.set()
 
-                        # Fire-and-forget: tell browser to stop playing queued audio
-                        async def _notify_interrupt():
+                            async def _notify_interrupt():
+                                try:
+                                    await _send({"type": "interrupt"})
+                                except Exception:
+                                    pass
+                            asyncio.create_task(_notify_interrupt())
+
                             try:
-                                await _send({"type": "interrupt"})
+                                await openai_ws.send(json.dumps({"type": "response.cancel"}))
                             except Exception:
                                 pass
-                        asyncio.create_task(_notify_interrupt())
-
-                        # Cancel OpenAI response
-                        try:
-                            await openai_ws.send(json.dumps({"type": "response.cancel"}))
-                        except Exception:
-                            pass
-                        # Truncate conversation item
-                        if last_assistant_item_id:
-                            try:
-                                await openai_ws.send(json.dumps({
-                                    "type": "conversation.item.truncate",
-                                    "item_id": last_assistant_item_id,
-                                    "content_index": 0,
-                                    "audio_end_ms": int(response_audio_sent_ms)
-                                }))
-                            except Exception:
-                                pass
+                            if last_assistant_item_id:
+                                try:
+                                    await openai_ws.send(json.dumps({
+                                        "type": "conversation.item.truncate",
+                                        "item_id": last_assistant_item_id,
+                                        "content_index": 0,
+                                        "audio_end_ms": int(response_audio_sent_ms)
+                                    }))
+                                except Exception:
+                                    pass
 
                     elif evt == "input_audio_buffer.speech_stopped":
                         await _debug("vad_speech_stopped", "🔇 Speech ended, processing...")
@@ -626,6 +673,17 @@ async def demo_voice_stream(websocket: WebSocket):
                                     "output": json.dumps(result)
                                 }
                             }))
+                            if result.get("status") == "office_closed":
+                                await openai_ws.send(json.dumps({
+                                    "type": "response.create",
+                                    "response": {
+                                        "instructions": (
+                                            "CRITICAL: Respond in the EXACT SAME language (English or Bangla/Banglish) "
+                                            "that the caller has been using throughout this conversation. "
+                                            "Do not repeat yourself."
+                                        )
+                                    }
+                                }))
                             continue
 
                         elif func_name == "book_appointment":
@@ -672,8 +730,18 @@ async def demo_voice_stream(websocket: WebSocket):
                                 "output": json.dumps(result)
                             }
                         }))
-                        # Trigger response
-                        await openai_ws.send(json.dumps({"type": "response.create"}))
+                        # Trigger response — with language enforcement so AI never switches
+                        # language after a tool call returns an English-language result
+                        await openai_ws.send(json.dumps({
+                            "type": "response.create",
+                            "response": {
+                                "instructions": (
+                                    "CRITICAL: Respond in the EXACT SAME language (English or Bangla/Banglish) "
+                                    "that the caller has been using throughout this conversation. "
+                                    "DO NOT switch to English just because the tool result is in English."
+                                )
+                            }
+                        }))
 
             except Exception as e:
                 print(f"🔴 [Demo] OpenAI stream error: {e}")

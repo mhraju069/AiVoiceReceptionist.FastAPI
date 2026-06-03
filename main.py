@@ -1,4 +1,6 @@
 import logging
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +9,7 @@ from database import engine, Base
 from routers import ghl, twilio, auth, activity
 from routers.auth import get_current_user
 from routers import booking, demo, dashboard, admin
+from services.ghl_oauth import start_token_refresh_loop
 
 # Configure logging for production
 logging.basicConfig(
@@ -18,7 +21,21 @@ logger = logging.getLogger("airec")
 # Create all database tables
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="AI Receptionist API", version="1.0.0")
+_refresh_task = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _refresh_task
+    # Start GHL V2 OAuth token auto-refresh loop in the background
+    _refresh_task = asyncio.create_task(start_token_refresh_loop())
+    logger.info("🔄 [Startup] GHL OAuth token refresh loop started.")
+    yield
+    # Shutdown: cancel the background refresh task cleanly
+    if _refresh_task and not _refresh_task.done():
+        _refresh_task.cancel()
+        logger.info("🛑 [Shutdown] GHL OAuth token refresh loop stopped.")
+
+app = FastAPI(title="AI Receptionist API", version="1.0.0", lifespan=lifespan)
 
 # Setup CORS for production frontend access
 app.add_middleware(

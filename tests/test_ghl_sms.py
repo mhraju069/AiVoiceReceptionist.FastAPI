@@ -29,7 +29,7 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-TEST_MESSAGE = "Test SMS from Reba AI — GHL pipeline diagnostic. Please ignore."
+TEST_MESSAGE = "Test SMS from রেবা AI — GHL pipeline diagnostic. Please ignore."
 
 
 def hr(label: str):

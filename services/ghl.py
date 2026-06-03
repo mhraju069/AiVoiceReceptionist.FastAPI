@@ -20,10 +20,16 @@ _appointments_cache = {}
 _contacts_cache = {}
 
 # Create headers for GHL API requests
+# Prefers V2 OAuth token (required for SMS Conversations API).
+# Falls back to V1 API key for backward compatibility.
 def get_ghl_headers():
+    from services.ghl_oauth import get_v2_access_token
+    v2_token = get_v2_access_token()
+    token = v2_token if v2_token else GHL_API_KEY
     return {
-        "Authorization": f"Bearer {GHL_API_KEY}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Version": "2021-07-28",   # Required header for GHL V2 API endpoints
     }
 
 

@@ -184,17 +184,6 @@ async def handle_transfer_call(args: dict, openai_ws, call_done, call_id: str, l
     
     if not is_office_open():
         await logger_or_debug("transfer_closed", f"📲 [Transfer] Transfer to {target} blocked: Office is closed.")
-        try:
-            await openai_ws.send(json.dumps({"type": "response.cancel"}))
-        except Exception:
-            pass
-        await openai_ws.send(json.dumps({
-            "type": "response.create",
-            "response": {
-                "output_modalities": ["audio"],
-                "instructions": f"In the SAME LANGUAGE the user is speaking, say this exact text: (English: 'I am sorry, our office is currently closed. We will call you back tomorrow during office hours.', Bangla: 'Sorry, amader office ekhon closed. Amra agami kal office hours-e apnake call back korbo.'). Do not paraphrase."
-            }
-        }))
         return {"status": "office_closed", "message": "Office is closed. Will callback tomorrow."}
 
     await logger_or_debug("transfer_call", f"📲 Transfer started to {target}. Simulating hold flow...")
