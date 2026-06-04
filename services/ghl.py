@@ -19,17 +19,27 @@ CACHE_TTL = 300  # 5 minutes in seconds
 _appointments_cache = {}
 _contacts_cache = {}
 
-# Create headers for GHL API requests
-# Prefers V2 OAuth token (required for SMS Conversations API).
-# Falls back to V1 API key for backward compatibility.
+# ── General GHL API headers (V1 / existing code — unchanged) ──────────────
+# Used by: booking, contacts, calendar, appointments
+# Token: GHL_API_KEY (original — safe for all existing functionality)
 def get_ghl_headers():
-    from services.ghl_oauth import get_v2_access_token
-    v2_token = get_v2_access_token()
-    token = v2_token if v2_token else GHL_API_KEY
+    return {
+        "Authorization": f"Bearer {GHL_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+# ── SMS-only headers (V2 LeadConnector) ───────────────────────────────────
+# Used ONLY by: send_sms_via_ghl()
+# Token: GHL_PIT_TOKEN → falls back to GHL_API_KEY
+def get_sms_headers():
+    import os
+    pit = os.getenv("GHL_PIT_TOKEN", "")
+    token = pit if pit else GHL_API_KEY
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "Version": "2021-07-28",   # Required header for GHL V2 API endpoints
+        "Version": "2021-07-28",
     }
 
 
@@ -389,15 +399,15 @@ async def get_contacts(query: Optional[str] = None, limit: int = 20):
 
 async def send_sms_via_ghl(to_phone: str, message: str) -> bool:
     """
-    Sends an SMS message using GoHighLevel API (supporting both V1 and V2 endpoints).
-    If the contact doesn't exist, it first creates it.
+    Sends an SMS via GoHighLevel V2 (LeadConnector) API.
+    All calls use PIT token (GHL_PIT_TOKEN) via get_ghl_headers().
     """
     import os
     from services.known_clients import normalize_phone
     from services.ghl_search import search_contact_by_phone_or_email
-    
+
+    # Normalize to E.164
     normalized = normalize_phone(to_phone)
-    # Ensure it is in E.164 format starting with +
     if not normalized.startswith("+"):
         if len(normalized) == 10:
             normalized = f"+1{normalized}"
@@ -405,134 +415,70 @@ async def send_sms_via_ghl(to_phone: str, message: str) -> bool:
             normalized = f"+{normalized}"
         else:
             normalized = f"+{normalized}"
-            
-    logger.info(f"📤 [GHL SMS] Starting SMS send to {normalized}...")
-    
-    contact_id = None
-    try:
-        # Search for existing contact in GHL
-        contact = await search_contact_by_phone_or_email(phone=normalized)
-        if contact:
-            contact_id = contact.get("id") or contact.get("contactId")
-            logger.info(f"✅ [GHL SMS] Found contact: {contact_id}")
-        else:
-            # Create a new contact
-            logger.info(f"🆕 [GHL SMS] Contact not found. Creating test contact in GHL...")
-            contact_resp = await add_contact(ContactCreate(
-                phone=normalized,
-                name="Prospect",
-                source="AI Call Text Request",
-                tags=["ai-text-request"]
-            ))
-            contact_obj = contact_resp.get("contact") or contact_resp
-            contact_id = contact_obj.get("id") or contact_obj.get("contactId")
-            logger.info(f"✅ [GHL SMS] Created contact: {contact_id}")
-    except Exception as e:
-        logger.error(f"❌ [GHL SMS] Error finding/creating contact: {e}")
-        
-    if not contact_id:
-        logger.error("❌ [GHL SMS] Could not get or create contact_id.")
-        return False
 
-    # Send message via GHL — conversation-based approach (correct for both V1 and V2)
-    headers = get_ghl_headers()
-    from_num = os.getenv("GHL_FROM_NUMBER", "")
+    logger.info(f"📤 [GHL SMS] Sending SMS to {normalized}...")
+    headers = get_sms_headers()  # PIT token — SMS only, does not affect booking/calendar
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        try_v2 = False
 
-        if "rest.gohighlevel.com" in GHL_BASE_URL or "api.gohighlevel.com" in GHL_BASE_URL:
-            # ── Attempt GHL V1 ──
-            convo_id = None
+        # ── Step 1: Find or create contact via V2 ──
+        contact_id = None
+
+        try:
+            contact = await search_contact_by_phone_or_email(phone=normalized)
+            if contact:
+                contact_id = contact.get("id") or contact.get("contactId")
+                logger.info(f"✅ [GHL SMS] Found contact: {contact_id}")
+        except Exception as e:
+            logger.error(f"❌ [GHL SMS] Search error: {e}")
+
+        if not contact_id:
             try:
-                search_resp = await client.get(
-                    f"{GHL_BASE_URL}/conversations/search",
-                    params={"contactId": contact_id, "locationId": GHL_LOCATION_ID},
+                logger.info("🆕 [GHL SMS] Creating contact via V2...")
+                r = await client.post(
+                    "https://services.leadconnectorhq.com/contacts/",
+                    json={"phone": normalized, "locationId": GHL_LOCATION_ID, "name": "Prospect"},
                     headers=headers,
                 )
-                if search_resp.status_code == 200:
-                    convos = search_resp.json().get("conversations", [])
-                    if convos:
-                        convo_id = convos[0].get("id")
-                        logger.info(f"✅ [GHL SMS] Found conversation: {convo_id}")
-                elif search_resp.status_code in (401, 403, 404):
-                    # 401/403: Invalid Token for V1 (likely V2 token used)
-                    # 404: Endpoint doesn't exist on V1 (fallback to V2 needed)
-                    logger.info(f"ℹ️ [GHL SMS] V1 search returned {search_resp.status_code}. Automatically switching to GHL V2...")
-                    try_v2 = True
-            except Exception as e:
-                logger.error(f"❌ [GHL SMS] Conversation search error: {e}")
-                try_v2 = True
-
-            if not try_v2 and not convo_id:
-                try:
-                    create_resp = await client.post(
-                        f"{GHL_BASE_URL}/conversations",
-                        json={"contactId": contact_id, "locationId": GHL_LOCATION_ID},
-                        headers=headers,
-                    )
-                    if create_resp.status_code in (200, 201):
-                        data = create_resp.json()
-                        convo_id = (data.get("conversation") or data).get("id")
-                        logger.info(f"✅ [GHL SMS] Created conversation: {convo_id}")
-                    elif create_resp.status_code in (401, 403, 404):
-                        logger.info(f"ℹ️ [GHL SMS] V1 create returned {create_resp.status_code}. Switching to GHL V2...")
-                        try_v2 = True
+                if r.status_code in (200, 201):
+                    obj = r.json().get("contact") or r.json()
+                    contact_id = obj.get("id") or obj.get("contactId")
+                    logger.info(f"✅ [GHL SMS] Created contact: {contact_id}")
+                elif r.status_code == 400:
+                    # GHL returns existing contactId in meta on duplicate — use it directly
+                    meta = r.json().get("meta", {})
+                    contact_id = meta.get("contactId")
+                    if contact_id:
+                        logger.info(f"✅ [GHL SMS] Duplicate contact — reusing existing ID: {contact_id}")
                     else:
-                        logger.error(f"❌ [GHL SMS] Conversation creation failed: {create_resp.status_code} {create_resp.text[:200]}")
-                except Exception as e:
-                    logger.error(f"❌ [GHL SMS] Conversation creation error: {e}")
-                    try_v2 = True
-
-            if not try_v2 and convo_id:
-                # Send message to the conversation
-                try:
-                    payload = {"type": "SMS", "message": message}
-                    if from_num:
-                        payload["fromNumber"] = from_num
-                    msg_resp = await client.post(
-                        f"{GHL_BASE_URL}/conversations/{convo_id}/messages",
-                        json=payload,
-                        headers=headers,
-                    )
-                    if msg_resp.status_code in (200, 201):
-                        logger.info(f"✅ [GHL SMS] V1 SMS sent to {normalized} via conversation {convo_id}")
-                        return True
-                    elif msg_resp.status_code in (401, 403, 404):
-                        logger.info(f"ℹ️ [GHL SMS] V1 send returned {msg_resp.status_code}. Switching to GHL V2...")
-                        try_v2 = True
-                    else:
-                        logger.error(f"❌ [GHL SMS] V1 message failed: {msg_resp.status_code} {msg_resp.text[:300]}")
-                except Exception as e:
-                    logger.error(f"❌ [GHL SMS] V1 send exception: {e}")
-                    try_v2 = True
-            elif not try_v2:
-                logger.error("❌ [GHL SMS] Could not get or create a conversation in V1.")
-                try_v2 = True
-
-        else:
-            try_v2 = True
-
-        if try_v2:
-            # ── GHL V2 (LeadConnector) ──
-            v2_url = "https://services.leadconnectorhq.com/conversations/messages"
-            v2_headers = {**headers, "Version": "2021-07-28"}
-            payload = {
-                "type": "SMS",
-                "contactId": contact_id,
-                "message": message,
-            }
-            if from_num:
-                payload["fromNumber"] = from_num
-            try:
-                resp = await client.post(v2_url, json=payload, headers=v2_headers)
-                if resp.status_code in (200, 201):
-                    logger.info(f"✅ [GHL SMS] V2 message sent to {normalized}")
-                    return True
+                        logger.error(f"❌ [GHL SMS] Contact create failed (400): {r.text[:200]}")
                 else:
-                    logger.error(f"❌ [GHL SMS] V2 failed ({resp.status_code}): {resp.text[:300]}")
+                    logger.error(f"❌ [GHL SMS] Contact create failed ({r.status_code}): {r.text[:200]}")
             except Exception as e:
-                logger.error(f"❌ [GHL SMS] V2 exception: {e}")
+                logger.error(f"❌ [GHL SMS] Contact create error: {e}")
+
+        if not contact_id:
+            logger.error("❌ [GHL SMS] No contact_id — aborting.")
+            return False
+
+        # ── Step 2: Send SMS via V2 Conversations ──
+        from_num = os.getenv("GHL_FROM_NUMBER", "")
+        payload = {"type": "SMS", "contactId": contact_id, "message": message}
+        if from_num:
+            payload["fromNumber"] = from_num
+
+        try:
+            resp = await client.post(
+                "https://services.leadconnectorhq.com/conversations/messages",
+                json=payload,
+                headers=headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"✅ [GHL SMS] SMS sent to {normalized} from {from_num or 'default'}")
+                return True
+            else:
+                logger.error(f"❌ [GHL SMS] Send failed ({resp.status_code}): {resp.text[:300]}")
+        except Exception as e:
+            logger.error(f"❌ [GHL SMS] Send exception: {e}")
 
     return False
-
