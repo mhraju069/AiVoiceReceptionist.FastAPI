@@ -363,11 +363,30 @@ async def handle_record_message(args: dict, contact_id: str, default_name: str, 
         f"Message: {message_text}"
     )
     
-    from services.ghl import add_crm_note
+    # Try to resolve contact_id and email if not provided or to get the email
+    from services.ghl import add_crm_note, get_contact
+    from services.ghl_search import search_contact_by_phone_or_email
+    
+    resolved_contact_id = contact_id
+    resolved_email = ""
+    
+    try:
+        contact_obj = None
+        if resolved_contact_id:
+            contact_obj = await get_contact(resolved_contact_id)
+        elif caller_phone_arg and caller_phone_arg != "N/A":
+            contact_obj = await search_contact_by_phone_or_email(phone=caller_phone_arg)
+            
+        if contact_obj:
+            resolved_contact_id = contact_obj.get("id") or contact_obj.get("contactId") or resolved_contact_id
+            resolved_email = contact_obj.get("email", "")
+    except Exception as e:
+        await logger_or_debug("record_message_resolve_err", f"⚠️ Error resolving contact details: {e}")
+
     saved = False
-    if contact_id:
+    if resolved_contact_id:
         try:
-            saved = await add_crm_note(contact_id, note)
+            saved = await add_crm_note(resolved_contact_id, note)
         except Exception as e:
             await logger_or_debug("record_message_err", f"⚠️ Failed to save note to GHL: {e}")
             
@@ -377,6 +396,71 @@ async def handle_record_message(args: dict, contact_id: str, default_name: str, 
         await logger_or_debug("record_message_local", f"📝 [CRM] No contact ID or CRM error, logging locally:\n{note}")
         result = {"status": "success", "message": "Message noted. Team will follow up."}
         
+    # ── Save callback request / message in CALENDAR_TEST calendar ──
+    async def _book_callback_in_calendar():
+        try:
+            email = resolved_email
+            if not email:
+                clean_phone = "".join(c for c in caller_phone_arg if c.isalnum())
+                email = f"callback_{clean_phone}@payminimumtax.com"
+
+            # Get first available slot in test_calendar
+            from services.booking_service import get_slots, book_appointment
+            slots_res = await get_slots(calendar_type="test_calendar")
+            
+            booking_slot = ""
+            if slots_res.get("status") == "success" and slots_res.get("available_slots"):
+                def extract_first_slot(data) -> str:
+                    if isinstance(data, list):
+                        for item in data:
+                            val = extract_first_slot(item)
+                            if val:
+                                return val
+                    elif isinstance(data, dict):
+                        for k in sorted(data.keys()):
+                            val = extract_first_slot(data[k])
+                            if val:
+                                return val
+                            if isinstance(k, str) and len(k) >= 19 and "T" in k:
+                                return k
+                    elif isinstance(data, str):
+                        if len(data) >= 19 and "T" in data:
+                            return data
+                    return ""
+                
+                booking_slot = extract_first_slot(slots_res["available_slots"])
+                
+            if not booking_slot:
+                from zoneinfo import ZoneInfo
+                from datetime import datetime, timedelta
+                OFFICE_TIMEZONE = "America/New_York"
+                OFFICE_TZ = ZoneInfo(OFFICE_TIMEZONE)
+                now_et = datetime.now(OFFICE_TZ)
+                check_dt = (now_et + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+                while True:
+                    if check_dt.weekday() < 5:
+                        break
+                    check_dt += timedelta(days=1)
+                utc_dt = check_dt.astimezone(ZoneInfo("UTC"))
+                booking_slot = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                
+            await logger_or_debug("record_message_calendar", f"📅 [Calendar] Booking callback on CALENDAR_TEST for slot: {booking_slot}")
+            
+            appt_res = await book_appointment(
+                name=caller_name_arg,
+                email=email,
+                phone=caller_phone_arg,
+                booking_slot=booking_slot,
+                call_summary=f"Callback Request / Message left:\n{message_text}\nReason: {call_reason_arg}",
+                calendar_type="test_calendar",
+                is_known_client=True
+            )
+            await logger_or_debug("record_message_calendar_result", f"📅 [Calendar] Callback booking result: {appt_res.get('status')}")
+        except Exception as e:
+            await logger_or_debug("record_message_calendar_error", f"⚠️ Failed to save callback in CALENDAR_TEST calendar: {e}")
+
+    asyncio.create_task(_book_callback_in_calendar())
+
     # Send real-time SMS alerts to team members if mentioned
     target_lower = message_text.lower() + " " + call_reason_arg.lower()
     from config import FORWARD_SIMON, FORWARD_TANZINA, FORWARD_ALEX, FORWARD_NAFI
