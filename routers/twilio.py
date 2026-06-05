@@ -130,24 +130,27 @@ END_CALL_BANGLA_CONSENT = (
     "শেষ",
 )
 
-END_CALL_PERMISSION_CUES = (
-    "permission to end",
-    "permission to hang up",
-    "can i end",
-    "may i end",
-    "end the call now",
-    "hang up now",
-    "disconnect now",
-    "কল শেষ",
-    "কলটা শেষ",
-    "কল কেটে",
-    "কলটা কেটে",
-    "শেষ করতে",
-    "কেটে দিতে",
-    "কেটে দিই",
-    "কেটে দিতে পারি",
-    "শেষ করে দিই",
-    "শেষ করব",
+# Phrases the AI says when wrapping up — "anything else?" type questions
+# When the Python layer detects these in the AI transcript, it enters
+# call_close_state=1 ("wrap-up mode"). The NEXT negative caller reply
+# directly triggers goodbye+hangup — no second permission question needed.
+END_CALL_WRAPUP_CUES = (
+    "anything else",
+    "anything more",
+    "is there anything",
+    "can i help you with anything",
+    "how else can i help",
+    "help you with anything else",
+    "ar kono help",
+    "ar kichu lagbe",
+    "ar kono",
+    "ar kichu",
+    "ar kivabe",
+    "help lagbe",
+    "kichu lagbe",
+    "আর কিছু লাগবে",
+    "আর কোনো",
+    "আর কিছু",
 )
 
 
@@ -160,10 +163,11 @@ def _normalized_text(text: str) -> str:
     return " ".join(_normalized_words(text))
 
 
-def _asks_end_call_permission(text: str) -> bool:
+def _asks_anything_else(text: str) -> bool:
+    """Returns True when the AI asks if the caller needs anything else (wrap-up cue)."""
     lowered = (text or "").lower()
     normalized = _normalized_text(text)
-    return any(cue in lowered or cue in normalized for cue in END_CALL_PERMISSION_CUES)
+    return any(cue in lowered or cue in normalized for cue in END_CALL_WRAPUP_CUES)
 
 
 def _is_end_call_consent(text: str) -> bool:
@@ -180,28 +184,56 @@ def _is_end_call_consent(text: str) -> bool:
     return False
 
 
-# Words/phrases that mean "No" / "I want to continue" in English, Banglish, or Bangla
+# Words/phrases that mean "No" / "done" / "nothing else needed"
+# We exclude highly ambiguous words like 'ha' or 'ma' from direct word-set matching
+# to prevent false hangups in longer sentences.
 _NEGATIVE_WORDS = {
-    "no", "nope", "nah", "na", "not", "never",
-    "না", "নাহ", "নো", "ma", "mha",
+    # English
+    "no", "nope", "nah", "not", "never", "nothing", "none", "done", "finished",
+    "that's", "thats",  # "that's all", "that's it"
+    # Banglish romanized
+    "na", "naa", "nah", "nei",
+    # Unicode Bangla
+    "না", "নাহ", "নো",
 }
 _NEGATIVE_PHRASES = (
-    "no thank", "not yet", "i have", "actually", "wait", "hold on",
-    "one more", "আরো", "আরও", "একটু", "আর একটু", "আর একটা",
+    # English
+    "no thank", "no need", "not yet", "not right", "that's all", "thats all",
+    "that's it", "thats it", "all done", "all good", "i'm good", "im good",
+    "nothing else", "no more", "i have", "actually", "wait", "hold on", "one more",
+    # Banglish
+    "ar lagbe na", "ar kichu na", "ar kono na", "ar na", "lagbe na",
+    "kono help na", "kichu lagbe na", "bole diechi", "dhonnobad", "thank you", "thanks",
+    # Unicode Bangla
+    "আরো", "আরও", "একটু", "আর একটু", "আর একটা",
     "আছে", "লাগবে", "বলতে চাই",
 )
 
 def _is_negative_response(text: str) -> bool:
-    """Returns True if the user is saying NO / wants to continue the conversation."""
+    """Returns True if the user is saying NO / wants to end the conversation."""
     lowered = (text or "").lower().strip()
     normalized = _normalized_text(text)
     words = set(normalized.split())
+    
+    # 1. Direct match on clear negative words
     if words & _NEGATIVE_WORDS:
         return True
+        
+    # 2. Match on clear negative phrases
     if any(phrase in lowered or phrase in normalized for phrase in _NEGATIVE_PHRASES):
         return True
+        
+    # 3. Handle common single-word Whisper mishearings of 'na'
+    # If the response is EXACTLY one of these ambiguous/misheard words, treat it as "no".
+    # This prevents false hangups when these words appear in longer positive sentences (e.g. "ha, booking kora lagbe").
+    single_word_mishearings = {"ma", "mha", "ba", "da", "ha", "ah", "uh", "oh", "now", "know"}
+    if normalized in single_word_mishearings:
+        return True
+        
+    # 4. Unicode fallback
     if any(char in (text or "") for char in ["না", "নাহ"]):
         return True
+        
     return False
 
 
@@ -613,6 +645,7 @@ async def twilio_stream(websocket: WebSocket):
     watchdog_active: list = [False]
     # 3-state call-close tracker: 0=idle, 1=end_call_permission_asked
     call_close_state: list = [0]
+    listening_active: list = [False]
 
     # Connect to OpenAI Realtime API if the API key is present
     if OPENAI_API_KEY:
@@ -647,54 +680,49 @@ async def twilio_stream(websocket: WebSocket):
                     "output_modalities": ["audio"],
                     "instructions": instructions + f"""
 
-                    # ADDITIONAL SESSION RULES
-                    - You are BILINGUAL: English and Bangla ONLY.
-                    - If the caller speaks Bangla, respond in Dhaka Bangla.
-                    - If the caller speaks English, respond in English.
-                    - IGNORE any Spanish, Chinese, or Portuguese hallucinations from the transcription.
-                    - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
-                    - NEVER switch to any other language.
-                    - If you are not sure if the caller is speaking to you, stay silent.
-                    - CALL ENDING FLOW (follow exactly):
-                      STEP 1 — After completing any task, ask if they need more help:
-                        English: "Is there anything else I can help you with?" (vary wording)
-                        Banglish: "Ar kono help lagbe?" or "Ar kono shahayta korte pari?" (vary wording)
-                      STEP 2 — If they say NO — ask permission ONCE:
-                        English: "Okay, can I go ahead and end the call now?"
-                        Banglish: "Thik ache, ami ki tahole call ta shesh kore dii?"
-                      STEP 3 — Wait for their YES or NO:
-                        - YES (yes, ok, sure, ji, haan, acha, kato, etc.) → say a SHORT goodbye then call end_call.
-                          Banglish goodbye: "Dhonnobad, bhalo thakben. Khoda Hafez."
-                          English goodbye: "Thank you for calling, goodbye! Have a great day."
-                        - NO (no, wait, na, arektu, etc.) → say "Ji bolun!" or "Of course, go ahead!" and CONTINUE. Do NOT call end_call.
-                        - UNCLEAR → say "Sorry, ektu abar bolben?" Do NOT ask permission again.
-                      CRITICAL: NEVER ask the permission question more than once per flow. If already asked, do not repeat it. If the user already heard it and responded, move on accordingly.
+                    # LIVE SESSION RULES (OVERRIDE NOTHING — ADD TO ABOVE)
 
-                    # NO REPETITIVE QUESTIONS (Issue 5)
+                    ## LANGUAGE LOCK — CRITICAL
+                    - You support EXACTLY TWO languages: English and Banglish (romanized Bangla).
+                    - NEVER output Bengali Unicode characters (e.g. ক খ গ). Always write Bangla in Latin script (Banglish).
+                    - DEFAULT language is ENGLISH. Start in English.
+                    - SWITCH to Banglish ONLY when the caller speaks a FULL Bangla/Banglish sentence. A single word, name, or greeting is NOT enough.
+                    - Once you detect the caller's language (English or Banglish), LOCK to it for the entire call. Never switch back.
+                    - If the caller speaks a third language (Hindi, Gujarati, Spanish, Chinese, etc.) say ONCE: "I am sorry, I only speak English and Bangla. How can I help you?" then continue in English.
+                    - IGNORE transcription noise, foreign hallucinations, or background sounds. Respond only to clear human speech.
+
+                    ## CALL ENDING — 2-STEP ONLY
+                    STEP 1: After completing a task, ask ONCE if they need more help:
+                      English: "Is there anything else I can help you with today?"
+                      Banglish: "Ar kono help lagbe apnar?"
+                    STEP 2: If they say NO (no, nah, na, na dhonnobad, that's all, ar lagbe na, nothing else, thanks):
+                      Say a warm SHORT goodbye in the SAME language, then call end_call immediately.
+                      English goodbye: "Thank you for calling Pay Minimum Tax! Have a great day. Goodbye!"
+                      Banglish goodbye: "Dhonnobad, Pay Minimum Tax-e call korar jonno. Bhalo thakben. Khoda Hafez!"
+                    If they say YES or have more (yes, haan, acha, bolun, ektu, wait, one more):
+                      Say "Of course, go ahead!" or "Ji bolun!" and continue. Do NOT call end_call.
+                    CRITICAL: Do NOT ask "Can I end the call?" or "Ami ki call shesh kore dii?" — this extra permission step is REMOVED.
+
+                    ## NO REPETITIVE QUESTIONS
                     - The caller's phone number is ALREADY KNOWN: {caller_number}. NEVER ask for it again.
-                    - If the caller's email is already in the CRM profile (shown below), NEVER ask for it again. Instead, CONFIRM it: say "We have your email as [email] — should I use that?" and wait for YES/NO.
-                    - Only collect email from scratch if the CRM email field is blank/empty.
-                    - NEVER ask the caller for information that is already visible in the CRM profile below.
+                    - If the caller's email is already in the CRM profile, NEVER ask for it again. Confirm it instead.
+                    - Only collect email if the CRM email field is empty.
+                    - NEVER ask for information already visible in the CALLER CRM PROFILE.
 
-                    # PAYMENT MODEL CLARIFICATION (Issue 5)
-                    - For paid appointments (virtual_cpa_45, office_cpa_45): the payment is NOT a separate fee. It is a PRE-PAYMENT that will be CREDITED towards their future invoice. Tell callers: "This payment will be credited towards your invoice — it's not an extra charge."
+                    ## PAYMENT MODEL
+                    - For paid appointments (virtual_cpa_45, office_cpa_45): payment is a PRE-PAYMENT credited to their invoice. It is NOT an extra charge.
+                    - English: "This payment will be credited towards your invoice — it's not an extra charge."
                     - Banglish: "Ei payment ta apnar invoice-e credit hoye jabe — eta alada kono charge na."
 
-                    # CLIENT RECOGNITION (Issue 8)
-                    - If the CRM profile shows a name (not "Prospect"), greet the caller by name and treat them as a recognized client.
-                    - Do NOT ask for their name, phone, or email if already in the CRM profile.
-                    - If the email field is populated: before sending any email or link, confirm: "I'll send that to [email] — is that still correct?"
-                    - If email is empty: politely ask once: "Could I get your email address to send the confirmation?"
-                    
-                    # CALLER CRM PROFILE
+                    ## CALLER CRM PROFILE
                     - Name: {contact_name}
-                    - Phone: {caller_number} (confirmed — do NOT ask for it)
+                    - Phone: {caller_number} (confirmed — do NOT ask)
                     - Client Type: {client_type}
                     - Group: {group}
                     - Contact ID: {contact_id}
-                    - Email: {email if email else 'Not Provided'}
+                    - Email: {email if email else 'Not Provided — ask once if needed'}
                     - Business Name: {business_name if business_name else 'Not Provided'}
-                    - Client Notes from CRM: {client_notes if client_notes else 'None'}
+                    - Client Notes: {client_notes if client_notes else 'None'}
                     - Has Invoice Due: {invoice_due}
                     """,
                     
@@ -869,7 +897,7 @@ async def twilio_stream(websocket: WebSocket):
                     if media_count % 100 == 0:
                         logger.info(f"🔊 [Twilio -> Server] Received {media_count} audio chunks from caller...")
                     
-                    if openai_ws:
+                    if openai_ws and listening_active[0]:
                         # Stream raw audio buffer directly to OpenAI
                         openai_payload = {
                             "type": "input_audio_buffer.append",
@@ -1070,9 +1098,9 @@ async def twilio_stream(websocket: WebSocket):
 
                 # Handle user interruption: Stop AI and clear Twilio buffer
                 elif event_type == "input_audio_buffer.speech_started":
-                    # When end-call is in progress, let the goodbye play uninterrupted.
-                    if end_call_in_progress[0]:
-                        logger.info("🌐 [OpenAI] Speech detected (ignored — goodbye in progress)")
+                    # When end-call is in progress or greeting is still playing, let the audio play uninterrupted.
+                    if end_call_in_progress[0] or not listening_active[0]:
+                        logger.info("🌐 [OpenAI] Speech detected (ignored — goodbye/greeting in progress)")
                     else:
                         logger.info("🛑 [OpenAI] User interrupted! Stopping AI immediately...")
                         interrupt_event.set()
@@ -1104,6 +1132,10 @@ async def twilio_stream(websocket: WebSocket):
                                 logger.info(f"✂️ [OpenAI] Truncated item at {int(response_audio_sent_ms)}ms")
                             except Exception as trunc_err:
                                 logger.error(f"🔴 [OpenAI] Failed to truncate: {trunc_err}")
+                    
+                    # Caller spoke — reset silence tracking
+                    if listening_active[0]:
+                        caller_spoke_after_ai[0] = True
 
                 elif event_type == "input_audio_buffer.speech_stopped":
                     logger.info("🔇 [OpenAI] Speech ended, waiting for transcript check...")
@@ -1121,6 +1153,14 @@ async def twilio_stream(websocket: WebSocket):
                     last_ai_response_done_at[0] = asyncio.get_event_loop().time() + audio_duration_sec
                     caller_spoke_after_ai[0] = False
                     logger.info(f"✅ [OpenAI] Response {done_id} finished ({event_type}). Audio Duration: {audio_duration_sec:.2f}s")
+
+                    if not listening_active[0]:
+                        async def activate_listening_after_delay(delay: float):
+                            await asyncio.sleep(max(0.0, delay))
+                            if not call_done.is_set():
+                                listening_active[0] = True
+                                logger.info("🟢 [OpenAI] Greeting playback completed. Listening activated!")
+                        asyncio.create_task(activate_listening_after_delay(audio_duration_sec))
                 
                 # Additional debug logging for other important OpenAI events
                 elif event_type in (
@@ -1133,17 +1173,16 @@ async def twilio_stream(websocket: WebSocket):
                     if text:
                         logger.info(f"\n🤖 [AI Reply]: {text}")
                         transcript_accumulator.append(f"AI: {text}")
-                        if _asks_end_call_permission(text):
+                        if _asks_anything_else(text):
                             import time as _time
                             if _time.time() < end_call_blocked_until[0]:
-                                # Still in cooldown after a decline — suppress the re-ask
-                                logger.info("🚫 [EndCall] AI tried to re-ask permission during cooldown — suppressed.")
+                                # Still in cooldown — AI already asked, suppress duplicate
+                                logger.info("🚫 [EndCall] AI tried to re-ask 'anything else' during cooldown — suppressed.")
                             elif end_call_in_progress[0]:
-                                # End-call already triggered — ignore duplicate permission transcript
-                                logger.info("🚫 [EndCall] End-call already in progress — ignoring duplicate permission transcript.")
+                                logger.info("🚫 [EndCall] End-call already in progress — ignoring wrap-up cue.")
                             else:
                                 call_close_state[0] = 1
-                                logger.info("📋 [EndCall] Permission question asked — waiting for caller response.")
+                                logger.info("📋 [EndCall] Wrap-up question asked — next negative reply will trigger goodbye.")
 
 
                 # Catch the user's speech transcript + detect caller goodbye
@@ -1159,26 +1198,40 @@ async def twilio_stream(websocket: WebSocket):
                         if is_explicit:
                             asyncio.create_task(_hangup_after_consent())
                         elif call_close_state[0] == 1:
-                            # Permission question was asked — evaluate the caller's response
-                            is_consent = _is_end_call_consent(user_text)
+                            # Wrap-up mode: AI asked "anything else?" — evaluate reply
                             is_negative = _is_negative_response(user_text)
+                            is_positive  = _is_end_call_consent(user_text)
                             if is_negative:
-                                # Caller wants to continue — reset and block re-ask for 30s
+                                # Caller doesn't need anything else → goodbye + hang up directly
+                                logger.info("✅ [EndCall] Caller said no to 'anything else' — triggering goodbye.")
+                                call_close_state[0] = 0
+                                asyncio.create_task(_hangup_after_consent())
+                            elif is_positive:
+                                # Caller has more to say — keep talking
                                 import time as _time
                                 call_close_state[0] = 0
                                 end_call_blocked_until[0] = _time.time() + 30
-                                logger.info("↩️ [EndCall] Caller declined — resetting, continuing conversation (blocked for 30s).")
-                            elif is_consent:
-                                logger.info("✅ [EndCall] Caller consented — hanging up.")
-                                # Reset state IMMEDIATELY (synchronously) before creating the
-                                # async task — prevents the race where the old AI transcript
-                                # re-arms call_close_state=1 before the task clears it
-                                call_close_state[0] = 0
-                                end_call_in_progress[0] = True
-                                asyncio.create_task(_hangup_after_consent())
+                                logger.info("↩️ [EndCall] Caller has more — continuing conversation (blocked for 30s).")
                             else:
-                                # Unclear response — AI will ask to repeat (no state change)
-                                logger.info("❓ [EndCall] Unclear response — AI will ask caller to repeat.")
+                                # Unclear — force AI to ask caller to REPEAT, NOT re-ask wrap-up question
+                                logger.info("❓ [EndCall] Unclear wrap-up response — forcing AI to ask caller to repeat.")
+                                try:
+                                    await openai_ws.send(json.dumps({
+                                        "type": "response.create",
+                                        "response": {
+                                            "output_modalities": ["audio"],
+                                            "instructions": (
+                                                "The caller's reply was unclear. "
+                                                "Do NOT repeat 'Ar kono help lagbe' or 'Is there anything else I can help you with'. "
+                                                "Ask them ONCE to repeat what they said. "
+                                                "English: 'Sorry, I didn\\'t quite catch that — could you say that again?' "
+                                                "Banglish: 'Sorry, ektu abar bolben?' "
+                                                "Use the SAME language as the rest of the conversation. One short sentence only."
+                                            )
+                                        }
+                                    }))
+                                except Exception:
+                                    pass
                         
 
                 # Handle tool calls

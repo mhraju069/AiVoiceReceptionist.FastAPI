@@ -18,7 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from services.openai_realtime import get_openai_realtime_model, get_openai_realtime_ws_url
 from services.prompts import system_prompt
-from routers.twilio import ADS, _asks_end_call_permission, _is_end_call_consent, _is_negative_response
+from routers.twilio import ADS, _asks_anything_else, _is_end_call_consent, _is_negative_response
 from routers.common_tools import (
     handle_book_appointment,
     handle_get_slots,
@@ -95,6 +95,7 @@ async def demo_voice_stream(websocket: WebSocket):
     watchdog_active: list = [False]             # becomes True after first greeting is done
     # 3-state call-close tracker: 0=idle, 1=end_call_permission_asked
     call_close_state: list = [0]
+    listening_active: list = [False]
 
     async def _send(msg: dict):
         """Helper to safely send JSON to browser."""
@@ -171,55 +172,50 @@ async def demo_voice_stream(websocket: WebSocket):
                         "model": OPENAI_REALTIME_MODEL,
                         "output_modalities": ["audio"],
                         "instructions": instructions + f"""
-                        
-                        # ADDITIONAL SESSION RULES
-                        - You are BILINGUAL: English and Bangla ONLY.
-                        - If the caller speaks Bangla, respond in Dhaka Bangla.
-                        - If the caller speaks English, respond in English.
-                        - IGNORE any Spanish, Chinese, or Portuguese hallucinations from the transcription.
-                        - If you hear noise, static, or irrelevant foreign words, REMAIN SILENT.
-                        - NEVER switch to any other language.
-                        - If you are not sure if the caller is speaking to you, stay silent.
-                        - CALL ENDING FLOW (follow exactly):
-                          STEP 1 — After completing any task, ask if they need more help:
-                            English: "Is there anything else I can help you with?" (vary wording)
-                            Banglish: "Ar kono help lagbe?" or "Ar kono shahayta korte pari?" (vary wording)
-                          STEP 2 — If they say NO — ask permission ONCE:
-                            English: "Okay, can I go ahead and end the call now?"
-                            Banglish: "Thik ache, ami ki tahole call ta shesh kore dii?"
-                          STEP 3 — Wait for their YES or NO:
-                            - YES (yes, ok, sure, ji, haan, acha, kato, etc.) → say a SHORT goodbye then call end_call.
-                              Banglish goodbye: "Dhonnobad, bhalo thakben. Khoda Hafez."
-                              English goodbye: "Thank you for calling, goodbye! Have a great day."
-                            - NO (no, wait, na, arektu, etc.) → say "Ji bolun!" or "Of course, go ahead!" and CONTINUE. Do NOT call end_call.
-                            - UNCLEAR → say "Sorry, ektu abar bolben?" Do NOT ask permission again.
-                          CRITICAL: NEVER ask the permission question more than once per flow. If already asked, do not repeat it. If the user already heard it and responded, move on accordingly.
 
-                        # NO REPETITIVE QUESTIONS (Issue 5)
+                        # LIVE SESSION RULES (OVERRIDE NOTHING — ADD TO ABOVE)
+
+                        ## LANGUAGE LOCK — CRITICAL
+                        - You support EXACTLY TWO languages: English and Banglish (romanized Bangla).
+                        - NEVER output Bengali Unicode characters (e.g. ক খ গ). Always write Bangla in Latin script (Banglish).
+                        - DEFAULT language is ENGLISH. Start in English.
+                        - SWITCH to Banglish ONLY when the caller speaks a FULL Bangla/Banglish sentence. A single word, name, or greeting is NOT enough.
+                        - Once you detect the caller's language (English or Banglish), LOCK to it for the entire call. Never switch back.
+                        - If the caller speaks a third language (Hindi, Gujarati, Spanish, Chinese, etc.) say ONCE: "I am sorry, I only speak English and Bangla. How can I help you?" then continue in English.
+                        - IGNORE transcription noise, foreign hallucinations, or background sounds. Respond only to clear human speech.
+
+                        ## CALL ENDING — 2-STEP ONLY
+                        STEP 1: After completing a task, ask ONCE if they need more help:
+                          English: "Is there anything else I can help you with today?"
+                          Banglish: "Ar kono help lagbe apnar?"
+                        STEP 2: If they say NO (no, nah, na, na dhonnobad, that's all, ar lagbe na, nothing else, thanks):
+                          Say a warm SHORT goodbye in the SAME language, then call end_call immediately.
+                          English goodbye: "Thank you for calling Pay Minimum Tax! Have a great day. Goodbye!"
+                          Banglish goodbye: "Dhonnobad, Pay Minimum Tax-e call korar jonno. Bhalo thakben. Khoda Hafez!"
+                        If they say YES or have more (yes, haan, acha, bolun, ektu, wait, one more):
+                          Say "Of course, go ahead!" or "Ji bolun!" and continue. Do NOT call end_call.
+                        CRITICAL: Do NOT ask "Can I end the call?" or "Ami ki call shesh kore dii?" — this extra permission step is REMOVED.
+
+                        ## NO REPETITIVE QUESTIONS
                         - The caller's phone number is ALREADY KNOWN: {phone}. NEVER ask for it again.
-                        - If the caller's email is already in the CRM profile (shown below), NEVER ask for it again. Instead, CONFIRM it: say "We have your email as [email] — should I use that?" and wait for YES/NO.
-                        - Only collect email from scratch if the CRM email field is blank/empty.
-                        - NEVER ask the caller for information that is already visible in the CRM profile below.
+                        - If the caller's email is already in the CRM profile, NEVER ask for it again. Confirm it instead.
+                        - Only collect email if the CRM email field is empty.
+                        - NEVER ask for information already visible in the CALLER CRM PROFILE.
 
-                        # PAYMENT MODEL CLARIFICATION (Issue 5)
-                        - For paid appointments (virtual_cpa_45, office_cpa_45): the payment is NOT a separate fee. It is a PRE-PAYMENT that will be CREDITED towards their future invoice. Tell callers: "This payment will be credited towards your invoice — it's not an extra charge."
+                        ## PAYMENT MODEL
+                        - For paid appointments (virtual_cpa_45, office_cpa_45): payment is a PRE-PAYMENT credited to their invoice. It is NOT an extra charge.
+                        - English: "This payment will be credited towards your invoice — it's not an extra charge."
                         - Banglish: "Ei payment ta apnar invoice-e credit hoye jabe — eta alada kono charge na."
 
-                        # CLIENT RECOGNITION (Issue 8)
-                        - If the CRM profile shows a name (not "Prospect"), greet the caller by name and treat them as a recognized client.
-                        - Do NOT ask for their name, phone, or email if already in the CRM profile.
-                        - If the email field is populated: before sending any email or link, confirm: "I'll send that to [email] — is that still correct?"
-                        - If email is empty: politely ask once: "Could I get your email address to send the confirmation?"
-
-                        # CALLER CRM PROFILE
+                        ## CALLER CRM PROFILE
                         - Name: {contact_name}
-                        - Phone: {phone} (confirmed — do NOT ask for it)
+                        - Phone: {phone} (confirmed — do NOT ask)
                         - Client Type: {client_type}
                         - Group: {group}
                         - Contact ID: {contact_id}
                         - Email: {email if email else 'Not on file — ask once if needed'}
                         - Business Name: {business_name if business_name else 'Not Provided'}
-                        - Client Notes from CRM: {client_notes if client_notes else 'None'}
+                        - Client Notes: {client_notes if client_notes else 'None'}
                         - Has Invoice Due: {invoice_due}
                         """,
                         "audio": {
@@ -388,7 +384,7 @@ async def demo_voice_stream(websocket: WebSocket):
                         audio_data = msg.get("data", "")
                         if chunk_count % 50 == 0:
                             await _debug("audio_chunks", f"🔊 Received {chunk_count} audio chunks from mic")
-                        if openai_ws:
+                        if openai_ws and listening_active[0]:
                             await openai_ws.send(json.dumps({
                                 "type": "input_audio_buffer.append",
                                 "audio": audio_data
@@ -560,17 +556,16 @@ async def demo_voice_stream(websocket: WebSocket):
                         text = openai_data.get("text") or openai_data.get("transcript")
                         if text:
                             ai_transcripts.append(text)
-                            if _asks_end_call_permission(text):
+                            if _asks_anything_else(text):
                                 import time as _time
                                 if _time.time() < end_call_blocked_until[0]:
-                                    # Still in cooldown after a decline — ignore this re-ask
-                                    await _debug("end_call_blocked", "🚫 AI tried to re-ask permission during cooldown — suppressed.")
+                                    # Still in cooldown — suppress duplicate
+                                    await _debug("end_call_blocked", "🚫 AI tried to re-ask 'anything else' during cooldown — suppressed.")
                                 elif end_call_in_progress[0]:
-                                    # End-call already triggered — ignore duplicate permission transcript
-                                    await _debug("end_call_blocked", "🚫 End-call in progress — ignoring duplicate permission transcript.")
+                                    await _debug("end_call_blocked", "🚫 End-call in progress — ignoring wrap-up cue.")
                                 else:
                                     call_close_state[0] = 1
-                                    await _debug("end_call_state", "📋 Permission question asked — waiting for caller response.")
+                                    await _debug("end_call_state", "📋 Wrap-up question asked — next negative reply will trigger goodbye.")
                             await _debug("ai_transcript", f"🤖 AI: {text}")
                             await _send({"type": "transcript", "role": "assistant", "text": text})
 
@@ -587,31 +582,47 @@ async def demo_voice_stream(websocket: WebSocket):
                             if is_explicit:
                                 asyncio.create_task(_end_demo_after_consent())
                             elif call_close_state[0] == 1:
-                                # Permission was asked — evaluate response
-                                is_consent = _is_end_call_consent(user_text)
+                                # Wrap-up mode: AI asked "anything else?" — evaluate reply
                                 is_negative = _is_negative_response(user_text)
-                                if is_consent:
-                                    await _debug("end_call_consent", "✅ Caller consented — ending call.")
-                                    # Reset state IMMEDIATELY (synchronously) before creating the
-                                    # async task — prevents the race where the old AI transcript
-                                    # re-arms call_close_state=1 before the task clears it
+                                is_positive  = _is_end_call_consent(user_text)
+                                if is_negative:
+                                    # Caller doesn't need anything else → goodbye + hang up directly
+                                    await _debug("end_call_consent", "✅ Caller said no to 'anything else' — triggering goodbye.")
                                     call_close_state[0] = 0
-                                    end_call_in_progress[0] = True
                                     asyncio.create_task(_end_demo_after_consent())
-                                elif is_negative:
+                                elif is_positive:
+                                    # Caller has more to say — keep talking
                                     import time as _time
                                     call_close_state[0] = 0
-                                    end_call_blocked_until[0] = _time.time() + 30  # Block re-ask for 30s
-                                    await _debug("end_call_declined", "↩️ Caller declined — resetting, continuing conversation (blocked for 30s).")
+                                    end_call_blocked_until[0] = _time.time() + 30
+                                    await _debug("end_call_declined", "↩️ Caller has more — continuing (blocked for 30s).")
                                 else:
-                                    await _debug("end_call_unclear", "❓ Unclear response — AI will ask caller to repeat.")
+                                    # Unclear — force AI to ask caller to REPEAT, NOT re-ask wrap-up
+                                    await _debug("end_call_unclear", "❓ Unclear response — forcing AI to ask caller to repeat.")
+                                    try:
+                                        await openai_ws.send(json.dumps({
+                                            "type": "response.create",
+                                            "response": {
+                                                "output_modalities": ["audio"],
+                                                "instructions": (
+                                                    "The caller's reply was unclear. "
+                                                    "Do NOT repeat 'Ar kono help lagbe' or 'Is there anything else I can help you with'. "
+                                                    "Ask them ONCE to repeat what they said. "
+                                                    "English: 'Sorry, I didn\\'t quite catch that — could you say that again?' "
+                                                    "Banglish: 'Sorry, ektu abar bolben?' "
+                                                    "Use the SAME language as the rest of the conversation. One short sentence only."
+                                                )
+                                            }
+                                        }))
+                                    except Exception:
+                                        pass
                             
 
                     elif evt == "input_audio_buffer.speech_started":
-                        # When end-call is in progress, let the goodbye play uninterrupted.
+                        # When end-call is in progress or greeting is still playing, let the audio play uninterrupted.
                         # Cancelling it here causes the call to hang instead of ending cleanly.
-                        if end_call_in_progress[0]:
-                            await _debug("vad_speech_started", "🌐 Speech detected (ignored — goodbye in progress)")
+                        if end_call_in_progress[0] or not listening_active[0]:
+                            await _debug("vad_speech_started", "🌐 Speech detected (ignored — goodbye/greeting in progress)")
                         else:
                             await _debug("vad_speech_started", "🎤 Speech detected — interrupting AI...")
                             interrupt_event.set()
@@ -637,13 +648,13 @@ async def demo_voice_stream(websocket: WebSocket):
                                     }))
                                 except Exception:
                                     pass
+                        
+                        # Caller spoke — reset silence tracking (if listening is active)
+                        if listening_active[0]:
+                            caller_spoke_after_ai[0] = True
 
                     elif evt == "input_audio_buffer.speech_stopped":
                         await _debug("vad_speech_stopped", "🔇 Speech ended, processing...")
-
-                    elif evt == "input_audio_buffer.speech_started":
-                        # Caller spoke — reset silence tracking
-                        caller_spoke_after_ai[0] = True
 
                     # Response finished or cancelled — clear interrupt so next response plays normally
                     elif evt in ("response.done", "response.cancelled"):
@@ -655,6 +666,14 @@ async def demo_voice_stream(websocket: WebSocket):
                         last_ai_response_done_at[0] = asyncio.get_event_loop().time() + audio_duration_sec
                         caller_spoke_after_ai[0] = False
                         await _debug("response_done", f"✅ Response done. Audio duration: {audio_duration_sec:.2f}s")
+
+                        if not listening_active[0]:
+                            async def activate_listening_after_delay(delay: float):
+                                await asyncio.sleep(max(0.0, delay))
+                                if not call_done.is_set():
+                                    listening_active[0] = True
+                                    await _debug("listening_active", "🟢 Greeting playback completed. Listening activated!")
+                            asyncio.create_task(activate_listening_after_delay(audio_duration_sec))
 
                     elif evt == "response.function_call_arguments.done":
                         func_name = openai_data.get("name")
