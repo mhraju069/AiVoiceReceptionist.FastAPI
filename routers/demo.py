@@ -18,7 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from services.openai_realtime import get_openai_realtime_model, get_openai_realtime_ws_url
 from services.prompts import system_prompt
-from routers.twilio import ADS, _asks_anything_else, _is_end_call_consent, _is_negative_response
+from routers.twilio import ADS, _asks_anything_else, _is_end_call_consent, _is_negative_response, _is_meaningful_transcript
 from routers.common_tools import (
     handle_book_appointment,
     handle_get_slots,
@@ -198,9 +198,9 @@ async def demo_voice_stream(websocket: WebSocket):
 
                         ## NO REPETITIVE QUESTIONS
                         - The caller's phone number is ALREADY KNOWN: {phone}. NEVER ask for it again.
-                        - If the caller's email is already in the CRM profile, NEVER ask for it again. Confirm it instead.
-                        - Only collect email if the CRM email field is empty.
-                        - NEVER ask for information already visible in the CALLER CRM PROFILE.
+                        - If the caller's email is in the CRM profile, or if they have already provided it in this conversation, NEVER ask for it again.
+                        - Only collect email once if it is missing from both the CRM profile and the conversation history. Once provided, remember it.
+                        - NEVER ask for information already visible in the CALLER CRM PROFILE or already collected during this call.
 
                         ## PAYMENT MODEL
                         - For paid appointments (virtual_cpa_45, office_cpa_45): payment is a PRE-PAYMENT credited to their invoice. It is NOT an extra charge.
@@ -597,25 +597,30 @@ async def demo_voice_stream(websocket: WebSocket):
                                     end_call_blocked_until[0] = _time.time() + 30
                                     await _debug("end_call_declined", "↩️ Caller has more — continuing (blocked for 30s).")
                                 else:
-                                    # Unclear — force AI to ask caller to REPEAT, NOT re-ask wrap-up
-                                    await _debug("end_call_unclear", "❓ Unclear response — forcing AI to ask caller to repeat.")
-                                    try:
-                                        await openai_ws.send(json.dumps({
-                                            "type": "response.create",
-                                            "response": {
-                                                "output_modalities": ["audio"],
-                                                "instructions": (
-                                                    "The caller's reply was unclear. "
-                                                    "Do NOT repeat 'Ar kono help lagbe' or 'Is there anything else I can help you with'. "
-                                                    "Ask them ONCE to repeat what they said. "
-                                                    "English: 'Sorry, I didn\\'t quite catch that — could you say that again?' "
-                                                    "Banglish: 'Sorry, ektu abar bolben?' "
-                                                    "Use the SAME language as the rest of the conversation. One short sentence only."
-                                                )
-                                            }
-                                        }))
-                                    except Exception:
-                                        pass
+                                    # Check if the transcript is actually meaningful (e.g. a new request or question)
+                                    if _is_meaningful_transcript(user_text):
+                                        await _debug("end_call_meaningful", "📝 Caller spoke a meaningful new sentence. Letting AI handle naturally.")
+                                        call_close_state[0] = 0
+                                    else:
+                                        # Truly unclear / noise — force AI to ask caller to REPEAT
+                                        await _debug("end_call_unclear", "❓ Unclear response — forcing AI to ask caller to repeat.")
+                                        try:
+                                            await openai_ws.send(json.dumps({
+                                                "type": "response.create",
+                                                "response": {
+                                                    "output_modalities": ["audio"],
+                                                    "instructions": (
+                                                        "The caller's reply was unclear. "
+                                                        "Do NOT repeat 'Ar kono help lagbe' or 'Is there anything else I can help you with'. "
+                                                        "Ask them ONCE to repeat what they said. "
+                                                        "English: 'Sorry, I didn\\'t quite catch that — could you say that again?' "
+                                                        "Banglish: 'Sorry, ektu abar bolben?' "
+                                                        "Use the SAME language as the rest of the conversation. One short sentence only."
+                                                    )
+                                                }
+                                            }))
+                                        except Exception:
+                                            pass
                             
 
                     elif evt == "input_audio_buffer.speech_started":
