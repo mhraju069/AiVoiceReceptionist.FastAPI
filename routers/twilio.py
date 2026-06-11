@@ -16,6 +16,7 @@ from routers.common_tools import (
     handle_transfer_call,
     handle_end_call,
     handle_send_link_sms,
+    handle_send_link_email,
     handle_record_message,
 )
 
@@ -848,6 +849,34 @@ async def twilio_stream(websocket: WebSocket):
                                 },
                                 "required": ["link_type"]
                             }
+                        },
+                        {
+                            "type": "function",
+                            "name": "send_link_email",
+                            "description": "Send a portal, payment, or any link to the caller via EMAIL. Use this when the caller says they don't have their phone, or explicitly asks to receive a link by email instead of text. Ask for their email address first if you don't already have it.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "email": {
+                                        "type": "string",
+                                        "description": "The caller's email address to send the link to."
+                                    },
+                                    "link_type": {
+                                        "type": "string",
+                                        "enum": ["signup", "login", "upload", "payment", "custom"],
+                                        "description": "Type of link: 'signup'=portal signup, 'login'=portal login, 'upload'=document upload, 'payment'=Stripe payment link, 'custom'=any other URL."
+                                    },
+                                    "custom_url": {
+                                        "type": "string",
+                                        "description": "Required when link_type is 'payment' or 'custom'. The full URL to send."
+                                    },
+                                    "name": {
+                                        "type": "string",
+                                        "description": "The caller's name for the email greeting."
+                                    }
+                                },
+                                "required": ["email", "link_type"]
+                            }
                         }
                     ],
                     "tool_choice": "auto"
@@ -1302,6 +1331,12 @@ async def twilio_stream(websocket: WebSocket):
                         result = await handle_send_link_sms(
                             args,
                             caller_number,
+                            _log_adapter
+                        )
+
+                    elif func_name == "send_link_email":
+                        result = await handle_send_link_email(
+                            args,
                             _log_adapter
                         )
 

@@ -239,6 +239,8 @@ def admin_calls(
 
 @router.get("/users", response_class=HTMLResponse, include_in_schema=False)
 def admin_users(
+    saved: Optional[str] = None,
+    error: Optional[str] = None,
     current_user: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -249,23 +251,193 @@ def admin_users(
           <td>{_e(user.name)}</td>
           <td>{_e(user.email)}</td>
           <td>{'Active' if user.is_active else 'Inactive'}</td>
-          <td>{_e(user.created_at)}</td>
+          <td>{_e(str(user.created_at)[:16] if user.created_at else '')}</td>
+          <td>
+            <div class="actions">
+              <button type="button" class="button" style="font-size:13px;" onclick="resetPassword('{_e(user.email)}')">Reset Password</button>
+              <form method="post" action="/admin/users/toggle-active" style="margin:0;">
+                <input type="hidden" name="user_id" value="{user.id}">
+                <button class="button {'danger' if user.is_active else ''}" type="submit"
+                  style="font-size:13px;background:{'#b42318' if user.is_active else '#0f766e'};">
+                  {'Deactivate' if user.is_active else 'Activate'}
+                </button>
+              </form>
+            </div>
+          </td>
         </tr>"""
         for user in users
     )
+
+    saved_html = '<div class="panel" style="border-color:#99d6c9;color:#0f766e;">User saved successfully.</div>' if saved else ""
+    error_html = f'<div class="panel error">{_e(error)}</div>' if error else ""
+
     body = f"""
+    {saved_html}
+    {error_html}
+    <section class="panel" id="user-form-panel">
+      <h2 id="form-title">Add New User</h2>
+      <form method="post" action="/admin/users/create">
+        <div class="grid">
+          <label>Full Name<input name="name" id="form-name" placeholder="e.g. Simon Ahmed" required></label>
+          <label>Email<input name="email" id="form-email" type="email" placeholder="admin@example.com" required></label>
+          <label>Password<input name="password" id="form-password" type="password" minlength="6" required></label>
+          <label>Confirm Password<input name="confirm_password" id="form-confirm" type="password" minlength="6" required></label>
+        </div>
+        <br>
+        <button type="submit">Create User</button>
+      </form>
+    </section>
+
+    <!-- Hidden inline reset-password form (shown via JS) -->
+    <section class="panel" id="reset-pw-panel" style="display:none;">
+      <h2>Reset Password — <span id="reset-email-label"></span></h2>
+      <form method="post" action="/admin/users/reset-password" id="reset-pw-form">
+        <input type="hidden" name="email" id="reset-email-input" value="">
+        <div class="grid">
+          <label>New Password<input name="new_password" type="password" minlength="6" required></label>
+          <label>Confirm New Password<input name="confirm_password" type="password" minlength="6" required></label>
+        </div>
+        <br>
+        <div style="display:flex;gap:8px;">
+          <button type="submit">Save New Password</button>
+          <button type="button" class="button" style="background:#667085;" onclick="cancelReset()">Cancel</button>
+        </div>
+      </form>
+    </section>
+
     <section class="panel">
       <div class="toolbar">
-        <h2>Users</h2>
+        <h2>Admin Users</h2>
         <span class="muted">{len(users)} total</span>
       </div>
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Status</th><th>Created</th></tr></thead>
-        <tbody>{rows or '<tr><td colspan="5" class="muted">No users found.</td></tr>'}</tbody>
+        <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody>{rows or '<tr><td colspan="6" class="muted">No users found.</td></tr>'}</tbody>
       </table>
     </section>
+
+    <script>
+      function resetPassword(email) {{
+        document.getElementById('reset-email-label').innerText = email;
+        document.getElementById('reset-email-input').value = email;
+        document.getElementById('reset-pw-panel').style.display = 'block';
+        document.getElementById('reset-pw-panel').scrollIntoView({{ behavior: 'smooth' }});
+      }}
+      function cancelReset() {{
+        document.getElementById('reset-pw-panel').style.display = 'none';
+        document.getElementById('reset-pw-form').reset();
+      }}
+    </script>
     """
     return _admin_layout("Users", body, current_user)
+
+
+@router.post("/users/create", include_in_schema=False)
+def admin_create_user(
+    name: str = Form(""),
+    email: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    current_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    from utils.auth_utils import get_password_hash
+    from urllib.parse import quote as _quote
+
+    email = email.strip().lower()
+    name  = name.strip()
+
+    if password != confirm_password:
+        return RedirectResponse(
+            f"/admin/users?error={_quote('Passwords do not match.')}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    if len(password) < 6:
+        return RedirectResponse(
+            f"/admin/users?error={_quote('Password must be at least 6 characters.')}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        return RedirectResponse(
+            f"/admin/users?error={_quote('A user with this email already exists.')}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    db_user = User(
+        email=email,
+        name=name or None,
+        hashed_password=get_password_hash(password),
+        is_active=True,
+    )
+    db.add(db_user)
+    db.commit()
+    return RedirectResponse("/admin/users?saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/users/reset-password", include_in_schema=False)
+def admin_reset_user_password(
+    email: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+    current_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    from utils.auth_utils import get_password_hash
+    from urllib.parse import quote as _quote
+
+    email = email.strip().lower()
+
+    if new_password != confirm_password:
+        return RedirectResponse(
+            f"/admin/users?error={_quote('Passwords do not match.')}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    if len(new_password) < 6:
+        return RedirectResponse(
+            f"/admin/users?error={_quote('Password must be at least 6 characters.')}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        return RedirectResponse(
+            f"/admin/users?error={_quote('User not found.')}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    user.hashed_password = get_password_hash(new_password)
+    db.commit()
+    return RedirectResponse("/admin/users?saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/users/toggle-active", include_in_schema=False)
+def admin_toggle_user_active(
+    user_id: int = Form(...),
+    current_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    from urllib.parse import quote as _quote
+
+    # Prevent self-lockout
+    if user_id == current_user.id:
+        return RedirectResponse(
+            f"/admin/users?error={_quote('You cannot deactivate your own account.')}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return RedirectResponse(
+            f"/admin/users?error={_quote('User not found.')}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    user.is_active = not user.is_active
+    db.commit()
+    return RedirectResponse("/admin/users?saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
 
 
 @router.get("/company", response_class=HTMLResponse, include_in_schema=False)
@@ -647,8 +819,110 @@ def admin_settings(
         <button type="submit">Save Settings</button>
       </form>
     </section>
+
+    <section class="panel">
+      <h2>🧪 Test Email Delivery</h2>
+      <p class="muted">Send a test email from inside the server to verify your SMTP configuration is working correctly.</p>
+      <form method="post" action="/admin/test-email">
+        <div class="grid" style="grid-template-columns: 1fr 1fr;">
+          <label>Send Test Email To
+            <input name="to_email" type="email" placeholder="you@example.com" required>
+          </label>
+        </div>
+        <br>
+        <button type="submit">Send Test Email</button>
+      </form>
+    </section>
     """
     return _admin_layout("Settings", body, current_user)
+
+
+@router.post("/test-email", include_in_schema=False)
+async def admin_test_email(
+    to_email: str = Form(...),
+    current_user: User = Depends(get_admin_user),
+):
+    import os, smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    host     = os.getenv("SMTP_HOST", "")
+    port     = int(os.getenv("SMTP_PORT", "587"))
+    user     = os.getenv("SMTP_USER", "")
+    password = os.getenv("SMTP_PASSWORD", "")
+    from_    = os.getenv("SMTP_FROM", user)
+
+    results = []
+
+    def try_send(label: str, connect_fn):
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"✅ Reba SMTP Test — {label}"
+            msg["From"]    = from_
+            msg["To"]      = to_email
+            msg.attach(MIMEText(
+                f"<p>This is a test email from the AI Receptionist admin panel.<br>"
+                f"Method: <strong>{label}</strong><br>"
+                f"Host: {host}:{port}<br>User: {user}</p>",
+                "html", "utf-8"
+            ))
+            server = connect_fn()
+            server.login(user, password)
+            server.sendmail(from_, to_email, msg.as_string())
+            server.quit()
+            results.append((label, True, "✅ Sent successfully"))
+            return True
+        except Exception as e:
+            results.append((label, False, f"❌ {type(e).__name__}: {e}"))
+            return False
+
+    # Attempt 1: STARTTLS
+    def starttls():
+        s = smtplib.SMTP(host, port, timeout=15)
+        s.ehlo(); s.starttls(); s.ehlo()
+        return s
+    if try_send(f"STARTTLS port {port}", starttls):
+        pass
+    else:
+        # Attempt 2: SSL 465
+        def ssl465():
+            s = smtplib.SMTP_SSL(host, 465, timeout=15)
+            s.ehlo()
+            return s
+        if not try_send("SSL port 465", ssl465):
+            # Attempt 3: Plain
+            def plain():
+                s = smtplib.SMTP(host, port, timeout=15)
+                s.ehlo()
+                return s
+            try_send(f"Plain SMTP port {port}", plain)
+
+    rows = "".join(
+        f"<tr><td>{_e(label)}</td>"
+        f"<td style='color:{'#0f766e' if ok else '#b42318'};'>{_e(msg)}</td></tr>"
+        for label, ok, msg in results
+    )
+    any_ok = any(ok for _, ok, _ in results)
+    banner_color = "#99d6c9" if any_ok else "#f5c6c6"
+    banner_text  = "color:#0f766e" if any_ok else "color:#b42318"
+    summary = "At least one method succeeded — email is working ✅" if any_ok else "All methods failed ❌ — check SMTP credentials and server firewall"
+
+    body = f"""
+    <div class="panel" style="border-color:{banner_color};{banner_text};">{_e(summary)}</div>
+    <section class="panel">
+      <h2>SMTP Test Results → {_e(to_email)}</h2>
+      <p class="muted">Host: {_e(host)}:{port} | User: {_e(user)}</p>
+      <table>
+        <thead><tr><th>Method</th><th>Result</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+      <br>
+      <a class="button" href="/admin/settings">← Back to Settings</a>
+    </section>
+    """
+    return _admin_layout("Email Test", body, current_user)
+
+
 
 
 @router.post("/settings", include_in_schema=False)

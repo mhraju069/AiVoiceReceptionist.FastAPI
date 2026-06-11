@@ -4,37 +4,77 @@ Sends confirmation and Stripe payment emails to callers.
 """
 import smtplib
 import asyncio
+import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM
 
+logger = logging.getLogger(__name__)
+
 
 def _send_email_sync(to_email: str, subject: str, html_body: str) -> bool:
-    """Synchronous SMTP email send (run in thread executor). Returns True on success."""
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = SMTP_FROM
-        msg["To"] = to_email
-        msg.attach(MIMEText(html_body, "html", "utf-8"))
+    """Synchronous SMTP email send (run in thread executor).
+    Tries STARTTLS on the configured port first, then SSL on 465,
+    then plain SMTP — covering all common hosting configurations.
+    Returns True on success.
+    """
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = SMTP_FROM
+    msg["To"]      = to_email
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+    last_error = None
+
+    # ── Attempt 1: STARTTLS on configured port (587 typical) ──────────────
+    try:
+        logger.info(f"📧 [Email] Attempting STARTTLS on {SMTP_HOST}:{SMTP_PORT}...")
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             server.ehlo()
             server.starttls()
+            server.ehlo()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_FROM, to_email, msg.as_string())
-
-        print(f"📧 [Email] Sent '{subject}' to {to_email}")
+        logger.info(f"✅ [Email] Sent (STARTTLS) '{subject}' → {to_email}")
         return True
     except Exception as e:
-        print(f"❌ [Email] Failed to send '{subject}' to {to_email}: {e}")
-        return False
+        last_error = e
+        logger.warning(f"⚠️ [Email] STARTTLS attempt failed ({type(e).__name__}): {e}")
+
+    # ── Attempt 2: SSL/TLS on port 465 ───────────────────────────────────
+    try:
+        logger.info(f"📧 [Email] Retrying with SSL on {SMTP_HOST}:465...")
+        with smtplib.SMTP_SSL(SMTP_HOST, 465, timeout=20) as server:
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, to_email, msg.as_string())
+        logger.info(f"✅ [Email] Sent (SSL) '{subject}' → {to_email}")
+        return True
+    except Exception as e:
+        last_error = e
+        logger.warning(f"⚠️ [Email] SSL attempt failed ({type(e).__name__}): {e}")
+
+    # ── Attempt 3: Plain SMTP on configured port (last resort) ───────────
+    try:
+        logger.info(f"📧 [Email] Retrying plain SMTP on {SMTP_HOST}:{SMTP_PORT}...")
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, to_email, msg.as_string())
+        logger.info(f"✅ [Email] Sent (plain) '{subject}' → {to_email}")
+        return True
+    except Exception as e:
+        last_error = e
+        logger.error(f"❌ [Email] All SMTP attempts failed for {to_email}: {type(e).__name__}: {e}")
+
+    return False
 
 
 async def send_email(to_email: str, subject: str, html_body: str) -> bool:
     """Async wrapper for sending emails. Returns True if delivered, False on failure."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _send_email_sync, to_email, subject, html_body)
+
 
 
 async def send_booking_confirmation(

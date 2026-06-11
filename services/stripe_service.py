@@ -1,8 +1,31 @@
 """
 Stripe service for creating payment links for new contacts.
 """
-import httpx
+import httpx, os
+from dotenv import load_dotenv
+load_dotenv()
 from config import STRIPE_SECRET_KEY
+
+
+def _get_base_url() -> str:
+    """
+    Resolve the public base URL for Stripe success/cancel redirects.
+    Priority:
+      1. BASE_URL env var  (e.g. https://payminimumtax.com)
+      2. PUBLIC_HOST env var (e.g. pmtax.duckdns.org) → prefixed with https://
+      3. Hardcoded fallback
+    """
+    base = os.getenv("BASE_URL", "").strip().rstrip("/")
+    if base:
+        return base
+
+    host = os.getenv("PUBLIC_HOST", "").strip().rstrip("/")
+    if host:
+        if host.startswith(("http://", "https://")):
+            return host
+        return f"https://{host}"
+
+    return "https://payminimumtax.com"
 
 
 async def create_stripe_payment_link(
@@ -40,8 +63,8 @@ async def create_stripe_payment_link(
         "line_items[0][price_data][product_data][name]": "AI Receptionist Booking Fee",
         "line_items[0][price_data][unit_amount]": str(amount_cents),
         "line_items[0][quantity]": "1",
-        "success_url": "https://payminimumtax.com/booking-success?session_id={CHECKOUT_SESSION_ID}",
-        "cancel_url": "https://payminimumtax.com/booking-cancelled",
+        "success_url": f"{_get_base_url()}/booking-success?session_id={{CHECKOUT_SESSION_ID}}",
+        "cancel_url":  f"{_get_base_url()}/booking-cancelled?session_id={{CHECKOUT_SESSION_ID}}",
         # All metadata fields for the webhook to consume
         "metadata[customer_name]": customer_name,
         "metadata[customer_email]": customer_email,

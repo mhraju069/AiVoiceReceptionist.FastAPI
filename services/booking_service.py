@@ -233,8 +233,9 @@ async def book_appointment(
     price = int(cal_config["price"] or 0)
 
     if not is_direct_booking:
+        import asyncio as _asyncio
         print(f"💰 [BookingService] Prospect/unknown caller. Payment required before booking: ${price}")
-        print(f"🔗 [BookingService] Generating and emailing payment link for {email}...")
+        print(f"🔗 [BookingService] Generating payment link for {name} | email={email} | phone={phone}")
         payment_url = await create_stripe_payment_link(
             customer_email=email,
             customer_name=name,
@@ -244,27 +245,99 @@ async def book_appointment(
             customer_phone=phone,
             amount_cents=int(price * 100),
         )
-        # Send the Stripe payment link email and track delivery
-        email_sent = await send_stripe_payment_link(
+
+        # ── Fire email AND SMS simultaneously — always both, regardless of each other ──
+        from services.ghl import send_sms_via_ghl
+        import os
+
+        async def _send_sms_payment():
+            """Send payment link via SMS — GHL PIT token primary, Twilio fallback."""
+            if not phone:
+                print("⚠️ [BookingService] No phone number — skipping SMS.")
+                return False
+
+            sms_body = (
+                f"Hello {name}, here is your secure payment link to confirm your "
+                f"appointment with Pay Minimum Tax:\n{payment_url}\n"
+                f"The appointment will be confirmed automatically after payment."
+            )
+
+            sms_provider = os.getenv("SMS_PROVIDER", "ghl").lower().strip()
+
+            # ── Primary: GHL via PIT token ──────────────────────────────────
+            if sms_provider == "ghl":
+                try:
+                    ok = await send_sms_via_ghl(phone, sms_body)
+                    if ok:
+                        print(f"✅ [BookingService] Payment link SMS sent via GHL to {phone}")
+                        return True
+                    print(f"⚠️ [BookingService] GHL SMS returned False for {phone}")
+                except Exception as e:
+                    print(f"⚠️ [BookingService] GHL SMS exception: {e}")
+
+            # ── Fallback: Twilio (only when SMS_PROVIDER=twilio or GHL failed) ──
+            try:
+                import base64, httpx as _httpx
+                twilio_sid   = os.getenv("TWILIO_SID", "")
+                twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+                twilio_from  = os.getenv("TWILIO_NUMBER", "")
+                if not (twilio_sid and twilio_token and twilio_from):
+                    print("⚠️ [BookingService] Twilio credentials missing — cannot fallback.")
+                    return False
+                auth_header = base64.b64encode(f"{twilio_sid}:{twilio_token}".encode()).decode()
+                async with _httpx.AsyncClient(timeout=10) as c:
+                    resp = await c.post(
+                        f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Messages.json",
+                        headers={"Authorization": f"Basic {auth_header}", "Content-Type": "application/x-www-form-urlencoded"},
+                        data={"To": phone, "From": twilio_from, "Body": sms_body},
+                    )
+                    if resp.status_code in (200, 201):
+                        print(f"✅ [BookingService] Payment link SMS sent via Twilio fallback to {phone}")
+                        return True
+                    print(f"❌ [BookingService] Twilio SMS failed ({resp.status_code}): {resp.text[:100]}")
+            except Exception as e:
+                print(f"❌ [BookingService] Twilio SMS exception: {e}")
+
+            return False
+
+
+        # Run both in parallel
+        email_task = _asyncio.create_task(send_stripe_payment_link(
             to_email=email,
             contact_name=name or "Caller",
             payment_url=payment_url,
             call_summary=call_summary,
-        )
+        ))
+        sms_task = _asyncio.create_task(_send_sms_payment())
 
-        if email_sent:
+        email_sent, sms_sent = await _asyncio.gather(email_task, sms_task, return_exceptions=True)
+        email_sent = email_sent if isinstance(email_sent, bool) else False
+        sms_sent   = sms_sent   if isinstance(sms_sent,   bool) else False
+
+        print(f"📧 [BookingService] Email sent: {email_sent} | 📱 SMS sent: {sms_sent}")
+
+        if email_sent and sms_sent:
             message = (
-                f"To confirm your appointment, a payment of ${price} is required. "
-                f"A secure payment link has been sent to {email}. "
-                f"The appointment will be booked after payment is completed."
+                f"PAYMENT_LINK_SENT: A secure payment link of ${price} has been sent to {email} AND texted to {phone}. "
+                f"The appointment will be confirmed automatically once payment is completed."
+            )
+        elif email_sent:
+            message = (
+                f"PAYMENT_LINK_SENT: A secure payment link of ${price} has been sent to {email}. "
+                f"SMS_DELIVERY_FAILED: The text message to {phone} could not be sent. "
+                f"The appointment will be confirmed after payment."
+            )
+        elif sms_sent:
+            message = (
+                f"PAYMENT_LINK_SENT: The payment link of ${price} has been texted to {phone}. "
+                f"EMAIL_DELIVERY_FAILED: Email to {email} could not be sent. "
+                f"The appointment will be confirmed after payment."
             )
         else:
-            # Email failed — be honest with the AI so it can tell the caller
             message = (
-                f"EMAIL_DELIVERY_FAILED: The payment link was generated (url={payment_url}) "
-                f"but could NOT be delivered to {email}. "
-                f"Inform the caller that the email could not be sent at this time, "
-                f"and that our team will follow up with the payment link manually."
+                f"BOTH_DELIVERY_FAILED: The payment link was generated (url={payment_url}) "
+                f"but could NOT be delivered to {email} by email or {phone} by SMS. "
+                f"Inform the caller that both channels failed and our team will send the link manually."
             )
 
         return {
@@ -272,8 +345,10 @@ async def book_appointment(
             "price": price,
             "payment_url": payment_url,
             "email_sent": email_sent,
+            "sms_sent": sms_sent,
             "message": message,
         }
+
 
     if not contact_id:
         new_contact_data = ContactCreate(

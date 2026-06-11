@@ -15,9 +15,82 @@ OFFICE_CLOSE = datetime_time(16, 0)
 
 def is_office_open() -> bool:
     now_et = datetime.now(OFFICE_TZ)
-    if now_et.weekday() >= 5: # Saturday or Sunday
+    if now_et.weekday() >= 5:  # Saturday or Sunday
         return False
     return OFFICE_OPEN <= now_et.time() < OFFICE_CLOSE
+
+
+def get_office_status_context() -> dict:
+    """
+    Returns a structured dict describing whether the office is open or closed right now,
+    with ready-made English + Banglish messages for the AI to use.
+    """
+    now_et = datetime.now(OFFICE_TZ)
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    day_name = weekday_names[now_et.weekday()]
+
+    if now_et.weekday() >= 5:  # Weekend
+        return {
+            "office_open": False,
+            "office_status": "OFFICE_CLOSED_WEEKEND",
+            "english_note": (
+                f"IMPORTANT: The office is CLOSED today ({day_name}). "
+                "Tell the caller FIRST: 'Our office is currently closed for the weekend. "
+                "However, I can still schedule you an appointment for the coming week.' "
+                "Then show future weekday slots only."
+            ),
+            "banglish_note": (
+                f"IMPORTANT: Office ekhon CLOSED ({day_name}, weekend). "
+                "Caller ke PROTHOME bolun: 'Amader office ekhon weekend-e bondho. "
+                "Tobe ami apnake agami saptaher jonno appointment book korte parbo.' "
+                "Taarpor future weekday slots dekhaan."
+            ),
+        }
+
+    if now_et.time() < OFFICE_OPEN:  # Before hours
+        open_time_str = OFFICE_OPEN.strftime("%I:%M %p")
+        return {
+            "office_open": False,
+            "office_status": "OFFICE_CLOSED_BEFORE_HOURS",
+            "english_note": (
+                f"IMPORTANT: The office is CLOSED right now (not yet open — opens at {open_time_str} ET). "
+                "Tell the caller FIRST: 'Our office hasn't opened yet — we open at 10:00 AM Eastern Time. "
+                "I can still book an appointment for later today or another day.' "
+                "Then show available slots."
+            ),
+            "banglish_note": (
+                f"IMPORTANT: Office ekhon CLOSED (abhi khuleni — {open_time_str} ET-te khulbe). "
+                "Caller ke PROTHOME bolun: 'Amader office ekhon khuleni — amra ET {open_time_str}-e khuli. "
+                "Tobe ami apnake aaj porey ba onnyo diner jonno appointment book korte parbo.' "
+                "Taarpor available slots dekhaan."
+            ),
+        }
+
+    if now_et.time() >= OFFICE_CLOSE:  # After hours
+        return {
+            "office_open": False,
+            "office_status": "OFFICE_CLOSED_AFTER_HOURS",
+            "english_note": (
+                "IMPORTANT: The office is CLOSED for today (office hours are 10 AM – 4 PM ET, Mon–Fri). "
+                "Tell the caller FIRST: 'Our office is now closed for the day. "
+                "But I can still help you book an appointment for tomorrow or a future date.' "
+                "Then show available future slots."
+            ),
+            "banglish_note": (
+                "IMPORTANT: Office aaj-er jonno CLOSED (office hours: ET 10 AM – 4 PM, Mon–Fri). "
+                "Caller ke PROTHOME bolun: 'Amader office aaj-er moto bondho hoye geche. "
+                "Tobe ami apnake agamikal ba onnyo diner jonno appointment schedule korte pari.' "
+                "Taarpor future slots dekhaan."
+            ),
+        }
+
+    # Office is open
+    return {
+        "office_open": True,
+        "office_status": "OFFICE_OPEN",
+        "english_note": "Office is currently OPEN (Mon–Fri, 10 AM – 4 PM ET). Proceed normally.",
+        "banglish_note": "Office ekhon OPEN (Mon–Fri, ET 10 AM – 4 PM). Normally proceed korun.",
+    }
 
 async def send_sms(to_number: str, message_body: str, logger_or_debug=None) -> bool:
     """Send an SMS using GoHighLevel or Twilio REST API."""
@@ -116,7 +189,7 @@ ADS = [
 
 async def handle_book_appointment(args: dict, logger_or_debug) -> dict:
     try:
-        name = args.get("name", "Caller")
+        name  = args.get("name", "Caller")
         phone = args.get("phone", "")
         result = await book_appointment(
             name=name,
@@ -126,54 +199,45 @@ async def handle_book_appointment(args: dict, logger_or_debug) -> dict:
             calendar_type=args.get("calendar_type", "follow_up_b"),
             call_summary=args.get("call_summary", ""),
         )
-        await logger_or_debug("tool_result", f"✅ Booking result: {result.get('status')}")
+        status = result.get("status")
+        await logger_or_debug("tool_result", f"✅ Booking result: {status}")
 
-        if result.get("status") == "payment_required" and phone:
-            payment_url = result.get("payment_url")
-            sms_body = f"Hello {name}, here is your payment link to confirm your appointment: {payment_url}"
-            sms_sent = await send_sms(phone, sms_body, logger_or_debug)
-
-            # Update the message to reflect actual SMS delivery
-            if sms_sent:
-                result["sms_sent"] = True
-                if result.get("email_sent"):
-                    result["message"] = (
-                        f"To confirm your appointment, a payment of ${result.get('price', '')} is required. "
-                        f"A secure payment link has been sent to {args.get('email', '')} and texted to {phone}."
-                    )
-                else:
-                    result["message"] = (
-                        f"To confirm your appointment, a payment of ${result.get('price', '')} is required. "
-                        f"The payment link has been texted to {phone}. "
-                        f"Email delivery failed — our team will follow up."
-                    )
-            else:
-                result["sms_sent"] = False
-                if not result.get("email_sent"):
-                    # Both channels failed — be fully honest
-                    result["message"] = (
-                        f"SMS_DELIVERY_FAILED EMAIL_DELIVERY_FAILED: "
-                        f"The payment link was generated but could NOT be delivered to {phone} by SMS or email. "
-                        f"Inform the caller that both delivery channels failed, and our team will contact them manually with the payment link."
-                    )
-                else:
-                    result["message"] = (
-                        f"To confirm your appointment, a payment of ${result.get('price', '')} is required. "
-                        f"A secure payment link has been sent to {args.get('email', '')}. "
-                        f"SMS_DELIVERY_FAILED: The text message to {phone} could not be delivered."
-                    )
+        # booking_service.py already fires email + SMS (via GHL PIT token) for
+        # payment_required cases. Log the delivery outcomes for debugging.
+        if status == "payment_required":
+            email_ok = result.get("email_sent", False)
+            sms_ok   = result.get("sms_sent",   False)
+            await logger_or_debug(
+                "payment_delivery",
+                f"📧 Email: {'✅' if email_ok else '❌'}  📱 SMS (GHL): {'✅' if sms_ok else '❌'}  "
+                f"→ {phone}"
+            )
 
         return result
     except Exception as e:
         await logger_or_debug("tool_error", f"🔴 Booking exception: {e}")
         return {"status": "error", "message": "Sorry, there was a technical issue booking your appointment. Please try again later."}
 
+
+
 async def handle_get_slots(args: dict, logger_or_debug) -> dict:
     try:
+        # ── Step 1: Determine live office status ──────────────────────────────
+        office_ctx = get_office_status_context()
+        await logger_or_debug("office_status", f"🏢 Office status: {office_ctx['office_status']}")
+
+        # ── Step 2: Fetch available slots from GHL ────────────────────────────
         result = await get_slots(
             calendar_type=args.get("calendar_type", "follow_up_b")
         )
-        await logger_or_debug("tool_result", "✅ Slots fetched successfully.")
+
+        # ── Step 3: Inject office context so AI knows the status before speaking
+        result["office_open"]   = office_ctx["office_open"]
+        result["office_status"] = office_ctx["office_status"]
+        result["office_note"]   = office_ctx["english_note"]
+        result["banglish_note"] = office_ctx["banglish_note"]
+
+        await logger_or_debug("tool_result", f"✅ Slots fetched. Office: {office_ctx['office_status']}")
         return result
     except Exception as e:
         await logger_or_debug("tool_error", f"🔴 Slot fetch exception: {e}")
@@ -347,6 +411,101 @@ async def handle_send_link_sms(args: dict, default_phone: str, logger_or_debug) 
                 f"and our team will send it manually."
             )
         }
+
+
+async def handle_send_link_email(args: dict, logger_or_debug) -> dict:
+    """
+    Send a portal/payment/calendar link to the caller via email.
+    Called when the caller says they don't have their phone or prefers email.
+    """
+    from services.email_service import send_email
+
+    to_email   = (args.get("email") or "").strip()
+    link_type  = (args.get("link_type") or "custom").lower().strip()
+    custom_url = (args.get("custom_url") or "").strip()
+    caller_name = (args.get("name") or "Valued Client").strip()
+
+    if not to_email:
+        return {
+            "status": "error",
+            "message": "EMAIL_MISSING: No email address provided. Ask the caller for their email address first.",
+        }
+
+    # ── Resolve the URL ────────────────────────────────────────────────────
+    preset_links = {
+        "signup":  ("Client Portal Sign-Up",     "https://portal.payminimumtax.com/signup"),
+        "login":   ("Client Portal Login",        "https://portal.payminimumtax.com/login"),
+        "upload":  ("Document Upload",            "https://www.payminimumtax.com/upload"),
+        "payment": ("Payment Link",               custom_url),
+        "custom":  ("Requested Link",             custom_url),
+    }
+
+    label, url = preset_links.get(link_type, ("Requested Link", custom_url))
+    if not url:
+        return {
+            "status": "error",
+            "message": f"No URL available for link_type='{link_type}'. Provide custom_url.",
+        }
+
+    # ── Build a clean HTML email ────────────────────────────────────────────
+    subject   = f"🔗 Your {label} — Pay Minimum Tax"
+    html_body = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; background: #f4f4f4; padding: 20px;">
+  <div style="max-width: 560px; margin: auto; background: white; border-radius: 12px;
+              padding: 32px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+    <h2 style="color: #6B3FA0;">👋 Hi {caller_name}!</h2>
+    <p>As requested during your call with our AI receptionist, here is your <strong>{label}</strong>:</p>
+
+    <div style="text-align: center; margin: 28px 0;">
+      <a href="{url}"
+         style="background: linear-gradient(135deg, #6B3FA0, #9B59B6); color: white;
+                padding: 14px 32px; border-radius: 50px; text-decoration: none;
+                font-size: 16px; font-weight: bold; display: inline-block;">
+        🔗 Open {label}
+      </a>
+    </div>
+
+    <p style="color: #555; font-size: 14px;">Or copy this link into your browser:</p>
+    <p style="background: #f0eaff; padding: 10px; border-radius: 6px; word-break: break-all;
+              font-size: 13px; color: #6B3FA0;">{url}</p>
+
+    <p style="margin-top: 24px; color: #888; font-size: 12px;">
+      This link was sent by Reba, the AI receptionist at Pay Minimum Tax.
+      If you did not request this, please ignore this email.
+    </p>
+  </div>
+</body>
+</html>"""
+
+    await logger_or_debug("send_email_link", f"📧 Sending {label} to {to_email}...")
+    sent = await send_email(to_email, subject, html_body)
+
+    if sent:
+        await logger_or_debug("send_email_link", f"✅ Email delivered to {to_email}")
+        return {
+            "status": "success",
+            "email_sent": True,
+            "message": (
+                f"EMAIL_SENT: The {label} has been sent to {to_email}. "
+                f"Tell the caller: 'I've emailed the link to {to_email}. "
+                f"Please check your inbox — and your spam folder if you don't see it within a minute.'"
+            ),
+        }
+    else:
+        await logger_or_debug("send_email_link", f"❌ Email delivery failed to {to_email}")
+        return {
+            "status": "email_failed",
+            "email_sent": False,
+            "message": (
+                f"EMAIL_DELIVERY_FAILED: Could not send the {label} to {to_email}. "
+                f"Inform the caller that email delivery failed and our team will send it manually. "
+                f"The link is: {url}"
+            ),
+        }
+
+
 
 async def handle_record_message(args: dict, contact_id: str, default_name: str, default_phone: str, logger_or_debug) -> dict:
     caller_name_arg  = args.get("caller_name", default_name) or "Caller"
