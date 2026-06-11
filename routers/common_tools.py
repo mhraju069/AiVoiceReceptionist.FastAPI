@@ -222,22 +222,23 @@ async def handle_book_appointment(args: dict, logger_or_debug) -> dict:
 
 async def handle_get_slots(args: dict, logger_or_debug) -> dict:
     try:
-        # ── Step 1: Determine live office status ──────────────────────────────
-        office_ctx = get_office_status_context()
-        await logger_or_debug("office_status", f"🏢 Office status: {office_ctx['office_status']}")
+        # # ── Step 1: Determine live office status ──────────────────────────────
+        # office_ctx = get_office_status_context()
+        # await logger_or_debug("office_status", f"🏢 Office status: {office_ctx['office_status']}")
 
         # ── Step 2: Fetch available slots from GHL ────────────────────────────
         result = await get_slots(
             calendar_type=args.get("calendar_type", "follow_up_b")
         )
 
-        # ── Step 3: Inject office context so AI knows the status before speaking
-        result["office_open"]   = office_ctx["office_open"]
-        result["office_status"] = office_ctx["office_status"]
-        result["office_note"]   = office_ctx["english_note"]
-        result["banglish_note"] = office_ctx["banglish_note"]
+        # # ── Step 3: Inject office context so AI knows the status before speaking
+        # result["office_open"]   = office_ctx["office_open"]
+        # result["office_status"] = office_ctx["office_status"]
+        # result["office_note"]   = office_ctx["english_note"]
+        # result["banglish_note"] = office_ctx["banglish_note"]
 
-        await logger_or_debug("tool_result", f"✅ Slots fetched. Office: {office_ctx['office_status']}")
+        # await logger_or_debug("tool_result", f"✅ Slots fetched. Office: {office_ctx['office_status']}")
+        await logger_or_debug("tool_result", "✅ Slots fetched successfully.")
         return result
     except Exception as e:
         await logger_or_debug("tool_error", f"🔴 Slot fetch exception: {e}")
