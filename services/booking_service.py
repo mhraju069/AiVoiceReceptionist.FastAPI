@@ -229,8 +229,8 @@ async def book_appointment(
     normalized_tags = [t.strip().upper() for t in tags]
     priority_check_tags = [g.strip().upper() for g in PRIORITY_GROUPS]
     is_priority = any(tag in priority_check_tags for tag in normalized_tags)
-    is_direct_booking = is_known_client or is_priority
     price = int(cal_config["price"] or 0)
+    is_direct_booking = is_known_client or is_priority or (price == 0)
 
     if not is_direct_booking:
         import asyncio as _asyncio

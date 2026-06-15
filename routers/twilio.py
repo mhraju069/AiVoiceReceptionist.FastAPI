@@ -198,16 +198,17 @@ _NEGATIVE_WORDS = {
     "না", "নাহ", "নো",
 }
 _NEGATIVE_PHRASES = (
-    # English
+    # English — clear, short end-of-conversation phrases only
     "no thank", "no need", "not yet", "not right", "that's all", "thats all",
     "that's it", "thats it", "all done", "all good", "i'm good", "im good",
-    "nothing else", "no more", "i have", "actually", "wait", "hold on", "one more",
-    # Banglish
+    "nothing else", "no more",
+    # Banglish — unambiguous "done / no more" phrases
     "ar lagbe na", "ar kichu na", "ar kono na", "ar na", "lagbe na",
     "kono help na", "kichu lagbe na", "bole diechi", "dhonnobad", "thank you", "thanks",
-    # Unicode Bangla
-    "আরো", "আরও", "একটু", "আর একটু", "আর একটা",
-    "আছে", "লাগবে", "বলতে চাই",
+    # NOTE: removed "i have", "actually", "wait", "hold on", "one more" — these are
+    # too ambiguous and caused false hangups when callers asked follow-up questions.
+    # NOTE: removed Bengali "আরো", "আরও", "একটু", "বলতে চাই" — these mean "more" /
+    # "I want to say something" which is POSITIVE, not end-of-call.
 )
 
 def _is_negative_response(text: str) -> bool:
@@ -215,26 +216,40 @@ def _is_negative_response(text: str) -> bool:
     lowered = (text or "").lower().strip()
     normalized = _normalized_text(text)
     words = set(normalized.split())
-    
-    # 1. Direct match on clear negative words
+    word_list = normalized.split()
+
+    # ── LONG SENTENCE GUARD ──────────────────────────────────────────────────
+    # If the caller says more than 5 words, they are almost certainly asking a
+    # question or making a new request — NOT saying goodbye.
+    # Only match against unambiguous, multi-word end-of-conversation phrases.
+    # Do NOT fire on a single embedded negative word like "no" or "not".
+    if len(word_list) > 5:
+        clear_end_phrases = (
+            "that's all", "thats all", "that's it", "thats it",
+            "all done", "nothing else", "no more",
+            "ar lagbe na", "ar kichu na", "lagbe na", "kichu lagbe na",
+        )
+        return any(phrase in lowered or phrase in normalized for phrase in clear_end_phrases)
+
+    # 1. Direct match on clear negative words (short responses only)
     if words & _NEGATIVE_WORDS:
         return True
-        
+
     # 2. Match on clear negative phrases
     if any(phrase in lowered or phrase in normalized for phrase in _NEGATIVE_PHRASES):
         return True
-        
+
     # 3. Handle common single-word Whisper mishearings of 'na'
     # If the response is EXACTLY one of these ambiguous/misheard words, treat it as "no".
-    # This prevents false hangups when these words appear in longer positive sentences (e.g. "ha, booking kora lagbe").
+    # This prevents false hangups when these words appear in longer positive sentences.
     single_word_mishearings = {"ma", "mha", "ba", "da", "ha", "ah", "uh", "oh", "now", "know"}
     if normalized in single_word_mishearings:
         return True
-        
+
     # 4. Unicode fallback
     if any(char in (text or "") for char in ["না", "নাহ"]):
         return True
-        
+
     return False
 
 

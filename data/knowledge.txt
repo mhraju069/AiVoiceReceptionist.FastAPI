@@ -8,10 +8,34 @@ Sunday: Closed
 We observe all US Federal holidays.
 We also observe the two Eid Holidays each year.
 
+== OFFICE ADDRESS ==
+Pay Minimum Tax
+55 Sixth Road, Suite 07
+Woburn, MA 01801
+
 == CONTACT INFORMATION ==
-Phone: +1-800-555-0199
-Email: Info@payminimumtax.com
-Website: www.payminimumtax.com
+Phone: 781-477-4272
+Primary Email: Info@PayMinimumTax.com
+Alternate Email: Info@PMT.CPA
+Website: www.PayMinimumTax.com
+
+== CLIENT PORTAL ==
+Login URL: Portal.PayMinimumTax.com/login
+Callers can log in to their client portal at: Portal.PayMinimumTax.com/login
+If a caller asks how to log in, give them this URL and say:
+  English: "You can log in to your client portal at Portal dot PayMinimumTax dot com slash login."
+  Banglish: "Apnar client portal-e login korte jaben Portal dot PayMinimumTax dot com slash login."
+
+== SENDING NOTICES OR DOCUMENTS VIA EMAIL ==
+- If a caller wants to send a notice or document by email, give them the primary email address: Info@PayMinimumTax.com
+- Do NOT direct callers to send notices to contact@PayMinimumTax.com — that address is internal only.
+- NEVER say "আমাদের website-এ পাবেন" or "you can find it on our website" when a caller asks for an email or address. Give it directly.
+
+== GIVING ADDRESS AND CONTACT DETAILS ==
+When a caller asks for the office address, phone number, or email:
+- Always give the full address, phone, and email directly. Do not ask them to check the website.
+- English script: "Our office is at 55 Sixth Road, Suite 07, Woburn, MA 01801. Our phone number is 781-477-4272 and you can reach us by email at Info at PayMinimumTax dot com."
+- Banglish script: "Amader office ache 55 Sixth Road, Suite 07, Woburn, MA-te. Phone number hocche 781-477-4272, ar email korten Info at PayMinimumTax dot com."
 
 == SERVICES ==
 1. Strategic Tax Planning & Consulting
