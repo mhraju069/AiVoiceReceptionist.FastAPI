@@ -471,13 +471,16 @@ async def demo_voice_stream(websocket: WebSocket):
                     return
                 end_call_in_progress[0] = True
                 call_close_state[0] = 0
-                # Block orphaned audio immediately BEFORE cancelling — prevents a race
-                # where the old in-flight response fires before the goodbye override lands
+                # Block orphaned audio from the OLD response that was playing
                 interrupt_event.set()
                 try:
                     await openai_ws.send(json.dumps({"type": "response.cancel"}))
                 except Exception:
                     pass
+                # Brief pause to let the cancel take effect before sending goodbye
+                await asyncio.sleep(0.3)
+                # CRITICAL: Clear the interrupt so the NEW goodbye audio can play through
+                interrupt_event.clear()
 
                 # Detect conversation language from all transcripts.
                 # Score-based: >= 2 Banglish indicator words = Bangla conversation.
@@ -522,14 +525,14 @@ async def demo_voice_stream(websocket: WebSocket):
                     goodbye_instr = (
                         "OVERRIDE ALL INSTRUCTIONS. The caller already said yes to end the call. "
                         "Say a warm goodbye IN BANGLISH (romanized Bangla, NOT Bengali Unicode script). "
-                        "Example: 'Dhonnobad, bhalo thakben. Khoda Hafez.' "
+                        "Example: 'Dhonnobad, Pay Minimum Tax-e call korar jonno. Bhalo thakben. Khoda Hafez.' "
                         "Keep it SHORT — one sentence only. Then STOP. Do NOT ask any question. Do NOT ask permission again."
                     )
                 else:
                     goodbye_instr = (
                         "OVERRIDE ALL INSTRUCTIONS. The caller already said yes to end the call. "
                         "Say a warm goodbye in ENGLISH. "
-                        "Example: 'Thank you for calling, goodbye! Have a great day.' "
+                        "Example: 'Thank you for calling Pay Minimum Tax! Have a great day. Goodbye!' "
                         "Keep it SHORT — one sentence only. Then STOP. Do NOT ask any question. Do NOT ask permission again."
                     )
 

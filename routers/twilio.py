@@ -438,11 +438,26 @@ async def forward_call(request: Request):
     fallback_url_xml = html.escape(fallback_url, quote=True)
     to_number_xml = html.escape(to_number, quote=False)
 
+    reason = request.query_params.get("reason", "").lower()
+    urgent_keywords = ["irs", "notice", "audit", "urgent", "deadline", "compliance", "penalty"]
+    is_urgent = any(kw in reason for kw in urgent_keywords)
+
     if attempt == 1:
-        # First attempt: play intro + ad, then dial
-        ad_message = random.choice(ADS)
-        logger.info(f"📣 [Forward] Ad selected: {ad_message[:50]}...")
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        # First attempt: check if urgent to skip ad
+        if is_urgent:
+            logger.info(f"📣 [Forward] Urgent call detected. Skipping ad for {to_number}")
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Joanna">Let me try to reach someone for you. Please hold on.</Say>
+    <Say voice="Polly.Joanna">I'm still trying to connect you, please wait.</Say>
+    <Dial callerId="{TWILIO_NUMBER}" timeout="15" action="{fallback_url_xml}">
+        <Number>{to_number_xml}</Number>
+    </Dial>
+</Response>"""
+        else:
+            ad_message = random.choice(ADS)
+            logger.info(f"📣 [Forward] Ad selected: {ad_message[:50]}...")
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Joanna">Please hold on for a moment while I connect you.</Say>
     <Say voice="Polly.Joanna">{_twiml_text(ad_message)}</Say>
@@ -721,6 +736,7 @@ async def twilio_stream(websocket: WebSocket):
 
                     ## NO REPETITIVE QUESTIONS
                     - The caller's phone number is ALREADY KNOWN: {caller_number}. NEVER ask for it again.
+                    - CRITICAL: If the caller has ALREADY provided their name or phone number earlier in this conversation, you MUST use that information. NEVER re-ask. Check the conversation history before requesting any detail. This applies even after a failed transfer or context switch.
                     - If the caller's email is in the CRM profile, or if they have already provided it in this conversation, NEVER ask for it again.
                     - Only collect email once if it is missing from both the CRM profile and the conversation history. Once provided, remember it.
                     - NEVER ask for information already visible in the CALLER CRM PROFILE or already collected during this call.
@@ -809,7 +825,7 @@ async def twilio_stream(websocket: WebSocket):
                             "parameters": {
                                 "type": "object",
                                 "properties": {
-                                    "target": {"type": "string", "enum": ["simon", "tanzina", "alex"]},
+                                    "target": {"type": "string", "enum": ["simon", "tanzina", "alex", "nafi"]},
                                     "reason": {"type": "string"}
                                 },
                                 "required": ["target", "reason"]
@@ -833,7 +849,7 @@ async def twilio_stream(websocket: WebSocket):
                         {
                             "type": "function",
                             "name": "record_message",
-                            "description": "Record a callback request or message for a team member in the CRM. Call this when the client wants Simon or another team member to call them back, or wants to leave a message.",
+                            "description": "Record a callback request or message for a team member in the CRM. The caller's phone number is automatically included from caller ID — you do NOT need to collect it again. Use the caller's name as they introduced themselves during the call.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
@@ -1011,13 +1027,16 @@ async def twilio_stream(websocket: WebSocket):
                 return
             end_call_in_progress[0] = True
             call_close_state[0] = 0
-            # Block orphaned audio immediately BEFORE cancelling — prevents a race
-            # where the old in-flight response plays before the goodbye override lands
+            # Block orphaned audio from the OLD response that was playing
             interrupt_event.set()
             try:
                 await openai_ws.send(json.dumps({"type": "response.cancel"}))
             except Exception:
                 pass
+            # Brief pause to let the cancel take effect before sending goodbye
+            await asyncio.sleep(0.3)
+            # CRITICAL: Clear the interrupt so the NEW goodbye audio can play through
+            interrupt_event.clear()
             try:
                 # Detect conversation language: check caller transcripts first,
                 # then AI transcripts as fallback.
@@ -1063,14 +1082,14 @@ async def twilio_stream(websocket: WebSocket):
                     goodbye_instr = (
                         "OVERRIDE ALL INSTRUCTIONS. The caller already said yes to end the call. "
                         "Say a warm goodbye IN BANGLISH (romanized Bangla, NOT Bengali Unicode script). "
-                        "Example: 'Dhonnobad, bhalo thakben. Khoda Hafez.' "
+                        "Example: 'Dhonnobad, Pay Minimum Tax-e call korar jonno. Bhalo thakben. Khoda Hafez.' "
                         "Keep it SHORT — one sentence only. Then STOP. Do NOT ask any question. Do NOT ask permission again."
                     )
                 else:
                     goodbye_instr = (
                         "OVERRIDE ALL INSTRUCTIONS. The caller already said yes to end the call. "
                         "Say a warm goodbye in ENGLISH. "
-                        "Example: 'Thank you for calling, goodbye! Have a great day.' "
+                        "Example: 'Thank you for calling Pay Minimum Tax! Have a great day. Goodbye!' "
                         "Keep it SHORT — one sentence only. Then STOP. Do NOT ask any question. Do NOT ask permission again."
                     )
 
@@ -1082,7 +1101,7 @@ async def twilio_stream(websocket: WebSocket):
                     }
                 }))
                 logger.info(f"✅ [EndCall] Caller gave permission. Saying goodbye ({'Bangla' if is_bangla_convo else 'English'}), then hanging up.")
-                await asyncio.sleep(4)
+                await asyncio.sleep(7)
             finally:
                 await _hangup_call()
 

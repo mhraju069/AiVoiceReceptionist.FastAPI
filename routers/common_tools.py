@@ -251,16 +251,26 @@ async def handle_transfer_call(args: dict, openai_ws, call_done, call_id: str, l
         await logger_or_debug("transfer_closed", f"📲 [Transfer] Transfer to {target} blocked: Office is closed.")
         return {"status": "office_closed", "message": "Office is closed. Will callback tomorrow."}
 
-    await logger_or_debug("transfer_call", f"📲 Transfer started to {target}. Simulating hold flow...")
+    reason = args.get("reason", "").lower()
+    urgent_keywords = ["irs", "notice", "audit", "urgent", "deadline", "compliance", "penalty"]
+    is_urgent = any(kw in reason for kw in urgent_keywords)
     
-    ad_msg = random.choice(ADS)
+    # Skip ad if the call reason is urgent
+    if is_urgent:
+        ad_msg = ""
+        await logger_or_debug("transfer_call", f"📲 Urgent transfer to {target}. Skipping ad.")
+        instructions = f"Say this in the SAME LANGUAGE the user is currently speaking: (English: 'Let me try to reach {target} for you. Please hold on.' or Bangla: 'Ektu hold korun, ami {target}-ke connect korchi.'). Do not paraphrase."
+    else:
+        ad_msg = random.choice(ADS)
+        await logger_or_debug("transfer_call", f"📲 Transfer started to {target}. Simulating hold flow with ad...")
+        instructions = f"Say this in the SAME LANGUAGE the user is currently speaking: (English: 'Let me try to reach {target} for you. Please hold on.' or Bangla: 'Ektu hold korun, ami {target}-ke connect korchi.'). Do not paraphrase. Then, switch to ENGLISH and say this advertisement naturally: '{ad_msg}'"
     
-    # Intro + Ad
+    # Intro (+ optional Ad)
     await openai_ws.send(json.dumps({
         "type": "response.create",
         "response": {
             "output_modalities": ["audio"],
-            "instructions": f"Say this in the SAME LANGUAGE the user is currently speaking: (English: 'Please hold on for a moment while I connect you to {target}' or Bangla: 'Ektu hold korun, ami {target}-ke connect korchi.'). Do not paraphrase. Then, switch to ENGLISH and say this advertisement naturally: '{ad_msg}'"
+            "instructions": instructions
         }
     }))
 
@@ -285,7 +295,7 @@ async def handle_transfer_call(args: dict, openai_ws, call_done, call_id: str, l
             "type": "response.create",
             "response": {
                 "output_modalities": ["audio"],
-                "instructions": f"In the SAME LANGUAGE the user is speaking, say this exact text: (English: 'I am sorry, {target} is not available right now. I\'ll make sure they get your message. Is there anything else I can help you with today?', Bangla: 'Sorry, {target} ekhon available nai. Ami apnar jonno ekta message rakhte dischi. Ami ki apnake r kono help korte pari?'). Do not paraphrase."
+                "instructions": f"In the SAME LANGUAGE the user is speaking, say this exact text: (English: 'I am sorry, {target} is not available right now.', Bangla: 'Sorry, {target} ekhon available nai.'). Do not paraphrase. Then, wait for the caller's response. If the caller asks to speak to someone else, IMMEDIATELY try the next available person in this order: Tanzina, Alex, Nafi by calling transfer_call again with the new target. Do NOT keep repeating that {target} is unavailable. If the caller just wants to leave a message, offer a callback."
             }
         }))
     
@@ -341,14 +351,24 @@ async def handle_end_call(
                     break
             
             if is_bangla_convo:
-                goodbye_instr = "In BANGLA (Dhaka style), say a short warm goodbye like: 'ধন্যবাদ, ভালো থাকবেন। খোদা হাফেজ।' Then stop speaking."
+                goodbye_instr = (
+                    "OVERRIDE ALL INSTRUCTIONS. Say a warm goodbye IN BANGLISH (romanized Bangla, NOT Bengali Unicode script). "
+                    "Example: 'Dhonnobad, Pay Minimum Tax-e call korar jonno. Bhalo thakben. Khoda Hafez.' "
+                    "Keep it SHORT — one sentence only. Then STOP."
+                )
             else:
-                goodbye_instr = "In ENGLISH, say a short warm goodbye like: 'Thank you, goodbye. Have a nice day.' Then stop speaking."
+                goodbye_instr = (
+                    "OVERRIDE ALL INSTRUCTIONS. Say a warm goodbye in ENGLISH. "
+                    "Example: 'Thank you for calling Pay Minimum Tax! Have a great day. Goodbye!' "
+                    "Keep it SHORT — one sentence only. Then STOP."
+                )
 
             try:
                 await openai_ws.send(json.dumps({"type": "response.cancel"}))
             except Exception:
                 pass
+            # Brief pause to let the cancel take effect before sending goodbye
+            await asyncio.sleep(0.3)
 
             try:
                 await openai_ws.send(json.dumps({
