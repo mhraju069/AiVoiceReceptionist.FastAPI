@@ -1038,38 +1038,45 @@ async def twilio_stream(websocket: WebSocket):
             # CRITICAL: Clear the interrupt so the NEW goodbye audio can play through
             interrupt_event.clear()
             try:
-                # Detect conversation language: check caller transcripts first,
-                # then AI transcripts as fallback.
-                # A score >= 2 from Banglish indicators counts as Bangla conversation.
+                # Detect conversation language from CALLER transcripts ONLY.
+                # AI entries must be excluded — the AI greeting starts with "Dhonnobad"
+                # which would falsely score the conversation as Bangla even in fully
+                # English calls.
                 is_bangla_convo = False
                 bangla_score = 0
                 banglish_indicators = {
-                    # Responses / affirmatives
-                    "ji", "jee", "jii", "ha", "haan", "hya", "acha", "accha", "thik",
+                    # Responses / affirmatives (caller-only words, short single-word replies)
+                    "ji", "jee", "jii", "haan", "hya", "acha", "accha", "thik",
                     # Negatives / continuations
-                    "na", "nah", "nei",
-                    # Common Bangla conversation words (romanized)
+                    "nei",
+                    # Common Bangla conversation words (romanized) — unambiguous ones only
                     "ami", "apne", "apnar", "apnake", "tumi", "amar", "amra",
                     "kemon", "kore", "korechi", "koren", "korbo",
                     "kete", "katun", "katen", "kato",
                     "den", "din", "dao",
-                    "bhai", "vai", "apa", "apa",
-                    "somossa", "shomossa", "kotha", "ki", "ke",
+                    "bhai", "vai", "apa",
+                    "somossa", "shomossa", "kotha",
                     "rakhlam", "rakhchi", "rakhbo",
-                    "allah", "hafez", "hafiz", "khoda",
+                    "hafez", "hafiz", "khoda",
                     "dhonnobad", "dhanyabad", "shukriya",
                     "bolun", "bolen", "bolbo", "boli",
-                    "lage", "lagbe", "lagche",
-                    "ache", "achhi", "achhen",
+                    "lagbe", "lagche",
+                    "achhi", "achhen",
                     "janen", "janbo", "janai",
                 }
                 for entry in transcript_accumulator:
-                    text = entry[entry.index(":")+1:].strip() if ":" in entry else entry
-                    # Definitive: any Unicode Bangla character
+                    # CRITICAL: Skip AI-generated transcript lines entirely.
+                    # The AI greeting says "Dhonnobad, Thank you for calling..." which
+                    # would falsely trigger Bangla detection for English conversations.
+                    if entry.startswith("AI:"):
+                        continue
+                    # Strip "Caller: " prefix if present
+                    text = entry[len("Caller:"):].strip() if entry.startswith("Caller:") else entry
+                    # Definitive: any Unicode Bangla character in CALLER speech
                     if any('\u0980' <= char <= '\u09FF' for char in text):
                         is_bangla_convo = True
                         break
-                    # Probabilistic: count Banglish indicator words
+                    # Probabilistic: count Banglish indicator words in CALLER speech
                     words = [w.strip("?,.!।") for w in text.lower().split()]
                     for w in words:
                         if w in banglish_indicators:

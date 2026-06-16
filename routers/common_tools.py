@@ -295,7 +295,29 @@ async def handle_transfer_call(args: dict, openai_ws, call_done, call_id: str, l
             "type": "response.create",
             "response": {
                 "output_modalities": ["audio"],
-                "instructions": f"In the SAME LANGUAGE the user is speaking, say this exact text: (English: 'I am sorry, {target} is not available right now.', Bangla: 'Sorry, {target} ekhon available nai.'). Do not paraphrase. Then, wait for the caller's response. If the caller asks to speak to someone else, IMMEDIATELY try the next available person in this order: Tanzina, Alex, Nafi by calling transfer_call again with the new target. Do NOT keep repeating that {target} is unavailable. If the caller just wants to leave a message, offer a callback."
+                "instructions": (
+                    f"In the SAME LANGUAGE the caller has been using throughout this conversation, follow these steps IN ORDER: "
+                    f"STEP 1 — Tell them no one is available: "
+                    f"(English: 'I am sorry, none of our associates are available right now.' "
+                    f"Banglish: 'Sorry, ekhon amader keu available nei.') "
+                    f"STEP 2 — Ask for their preferred callback time: "
+                    f"(English: 'What time would you prefer for us to call you back?' "
+                    f"Banglish: 'Apni ki time-e callback pete chan?') "
+                    f"STEP 3 — Wait for the caller to give a time (e.g. 'Tomorrow at 2 PM', 'After 3', 'Kal bikel 3 tar por'). "
+                    f"STEP 4 — Once they give a preferred time, call `record_message` with: "
+                    f"  caller_name = their name, "
+                    f"  caller_phone = their phone number (already known), "
+                    f"  message = 'Callback requested. Preferred callback time: [the time they said]. Reason: [call reason]', "
+                    f"  call_reason = 'callback'. "
+                    f"STEP 5 — Confirm back to the caller: "
+                    f"(English: 'Perfect! I've noted that you'd like a callback at [time]. Our team will reach out then.' "
+                    f"Banglish: 'Thik ache! Ami note kore rekhechi je apni [time]-e callback chai. Amader team apnake okhane call korbe.') "
+                    f"STEP 6 — Ask once if anything else is needed. If not, say goodbye and call end_call. "
+                    f"EXTRA RULES: "
+                    f"- Do NOT skip asking for a preferred time. ALWAYS ask before calling record_message. "
+                    f"- If the caller says 'anytime' or 'whenever', write 'Preferred callback time: anytime during office hours' in the message. "
+                    f"- If the caller asks to speak to someone ELSE, immediately call transfer_call with the next person: Tanzina → Alex → Nafi."
+                )
             }
         }))
     
@@ -332,10 +354,28 @@ async def handle_end_call(
         end_call_in_progress[0] = True
         
         async def _delayed_hangup():
-            # Detect language from caller/user speech only — skip AI transcript entries
-            # Entries may be raw strings (demo.py) or prefixed with "Caller:"/"AI:" (twilio.py)
+            # Detect language from CALLER speech only — skip AI transcript entries.
+            # AI greeting starts with "Dhonnobad" which would falsely score the
+            # conversation as Bangla even in fully English calls.
             is_bangla_convo = False
-            banglish_indicators = {"ami", "apne", "apnar", "tumi", "kemon", "accha", "acha", "thik", "kore", "korechi", "koren", "kete", "den", "din", "ji", "ha", "na", "bhai", "somossa", "rakhlam", "rakhchi", "allah", "hafez", "khoda"}
+            banglish_indicators = {
+                # Unambiguous Banglish words that only occur in Bangla speech:
+                "ami", "apne", "apnar", "apnake", "tumi", "amar", "amra",
+                "kemon", "kore", "korechi", "koren", "korbo",
+                "kete", "katun", "katen",
+                "den", "din",
+                "bhai", "vai", "apa",
+                "somossa", "shomossa", "kotha",
+                "rakhlam", "rakhchi", "rakhbo",
+                "hafez", "hafiz", "khoda",
+                "dhonnobad", "dhanyabad", "shukriya",
+                "bolun", "bolen", "bolbo",
+                "lagbe", "lagche",
+                "achhi", "achhen",
+                "janen", "janbo",
+                # Short unambiguous affirmatives only:
+                "ji", "jee", "jii", "haan", "hya", "acha", "accha", "thik",
+            }
             for entry in reversed(transcript_history):
                 # Skip AI-generated transcript lines to avoid false Bangla detection
                 if entry.startswith("AI:"):
@@ -345,7 +385,7 @@ async def handle_end_call(
                 if any('\u0980' <= char <= '\u09FF' for char in text):
                     is_bangla_convo = True
                     break
-                words = [w.strip("?,.!") for w in text.lower().split()]
+                words = [w.strip("?,.!।") for w in text.lower().split()]
                 if any(w in banglish_indicators for w in words):
                     is_bangla_convo = True
                     break
