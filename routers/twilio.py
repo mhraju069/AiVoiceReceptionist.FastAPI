@@ -1065,24 +1065,15 @@ async def twilio_stream(websocket: WebSocket):
                 is_bangla_convo = False
                 bangla_score = 0
                 banglish_indicators = {
-                    # Responses / affirmatives (caller-only words, short single-word replies)
-                    "ji", "jee", "jii", "haan", "hya", "acha", "accha", "thik",
-                    # Negatives / continuations
-                    "nei",
-                    # Common Bangla conversation words (romanized) — unambiguous ones only
-                    "ami", "apne", "apnar", "apnake", "tumi", "amar", "amra",
-                    "kemon", "kore", "korechi", "koren", "korbo",
-                    "kete", "katun", "katen", "kato",
-                    "den", "din", "dao",
-                    "bhai", "vai", "apa",
-                    "somossa", "shomossa", "kotha",
-                    "rakhlam", "rakhchi", "rakhbo",
-                    "hafez", "hafiz", "khoda",
-                    "dhonnobad", "dhanyabad", "shukriya",
-                    "bolun", "bolen", "bolbo", "boli",
-                    "lagbe", "lagche",
-                    "achhi", "achhen",
-                    "janen", "janbo", "janai",
+                    # Pronouns
+                    "ami", "apne", "apnar", "apnake", "tumi", "amar", "amra", "amader", "apnader",
+                    # Verbs / Actions
+                    "korechi", "korbo", "korben", "kete", "katun", "katen", "rakhlam", "rakhchi", "rakhbo",
+                    "bolun", "bolen", "bolbo", "boli", "lagbe", "lagche", "achhi", "achhen", "janen", "janbo", "janai",
+                    # Greetings / Politeness
+                    "dhonnobad", "dhanyabad", "shukriya", "hafez", "hafiz", "khoda", "bhalo", "valo", "thakben",
+                    # Common nouns / adjectives
+                    "kemon", "somossa", "shomossa", "shathe", "sate"
                 }
                 for entry in transcript_accumulator:
                     # CRITICAL: Skip AI-generated transcript lines entirely.
@@ -1101,9 +1092,8 @@ async def twilio_stream(websocket: WebSocket):
                     for w in words:
                         if w in banglish_indicators:
                             bangla_score += 1
-                    if bangla_score >= 2:
-                        is_bangla_convo = True
-                        break
+                if bangla_score >= 3:
+                    is_bangla_convo = True
 
                 if is_bangla_convo:
                     goodbye_instr = (

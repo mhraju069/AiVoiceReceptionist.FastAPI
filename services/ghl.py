@@ -109,22 +109,8 @@ async def get_contact_profile_by_phone(phone: str) -> dict:
     Returns a structured profile for the AI: name, group (A/B/C/D), 
     client type, and invoice status from GHL tags.
     """
-    from services.known_clients import normalize_phone
-    normalized = normalize_phone(phone)
-    search_phone = phone
-    if normalized:
-        if len(normalized) == 11 and normalized.startswith("1"):
-            search_phone = f"+{normalized}"
-        elif len(normalized) == 10:
-            search_phone = f"+1{normalized}"
-
-    contact = await get_contact_by_phone(search_phone)
-    if not contact and normalized:
-        # Fallback 1: Try searching with 11-digit format without +
-        contact = await get_contact_by_phone(normalized)
-        if not contact and len(normalized) == 11 and normalized.startswith("1"):
-            # Fallback 2: Try searching with 10-digit format
-            contact = await get_contact_by_phone(normalized[1:])
+    from services.ghl_search import search_contact_by_phone_or_email
+    contact = await search_contact_by_phone_or_email(phone=phone)
 
     if not contact:
         return {"found": False, "client_type": "Prospect", "group": None, "name": None}
@@ -146,7 +132,7 @@ async def get_contact_profile_by_phone(phone: str) -> dict:
             group = g
             break
 
-    client_type = "Prospect"
+    client_type = "Known Client"
     if any("ADHOC" in tag for tag in tags):
         client_type = "Adhoc"
     elif group:

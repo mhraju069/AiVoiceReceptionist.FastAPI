@@ -40,9 +40,9 @@ async def search_contact_by_phone_or_email(phone: Optional[str] = None, email: O
         clean_target_phone = "".join(filter(str.isdigit, phone))
         target_last_10 = clean_target_phone[-10:] if len(clean_target_phone) >= 10 else clean_target_phone
         
-        # Search by the last 4 digits to maximize the chance of a text match in GHL,
+        # Search by the last 10 digits to maximize the chance of finding the exact match in GHL,
         # handling cases where GHL has the number saved slightly differently (e.g., (908) 906-7284)
-        query_value = clean_target_phone[-4:] if len(clean_target_phone) >= 4 else clean_target_phone
+        query_value = target_last_10
     
     if not query_value:
         return None
