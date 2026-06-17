@@ -16,6 +16,7 @@ from routers.common_tools import (
     handle_transfer_call,
     handle_end_call,
     handle_send_link_sms,
+    handle_send_custom_sms,
     handle_send_link_email,
     handle_record_message,
 )
@@ -883,6 +884,25 @@ async def twilio_stream(websocket: WebSocket):
                         },
                         {
                             "type": "function",
+                            "name": "send_custom_sms",
+                            "description": "Send an arbitrary text message (SMS) to the caller. Use this when the caller asks for information like an address, email, or brief text to be sent to their phone.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string",
+                                        "description": "The exact text message content to send to the user."
+                                    },
+                                    "phone_number": {
+                                        "type": "string",
+                                        "description": "Optional destination phone number. Defaults to the caller's phone."
+                                    }
+                                },
+                                "required": ["message"]
+                            }
+                        },
+                        {
+                            "type": "function",
                             "name": "send_link_email",
                             "description": "Send a portal, payment, or any link to the caller via EMAIL. Use this when the caller says they don't have their phone, or explicitly asks to receive a link by email instead of text. Ask for their email address first if you don't already have it.",
                             "parameters": {
@@ -1370,6 +1390,13 @@ async def twilio_stream(websocket: WebSocket):
 
                     elif func_name == "send_link_sms":
                         result = await handle_send_link_sms(
+                            args,
+                            caller_number,
+                            _log_adapter
+                        )
+
+                    elif func_name == "send_custom_sms":
+                        result = await handle_send_custom_sms(
                             args,
                             caller_number,
                             _log_adapter

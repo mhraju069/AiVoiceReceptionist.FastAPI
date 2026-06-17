@@ -479,6 +479,33 @@ async def handle_send_link_sms(args: dict, default_phone: str, logger_or_debug) 
             )
         }
 
+async def handle_send_custom_sms(args: dict, default_phone: str, logger_or_debug) -> dict:
+    message_body = args.get("message")
+    phone = args.get("phone_number", default_phone)
+    
+    if not phone or phone == "N/A" or phone.strip() == "":
+        return {"status": "error", "message": "No phone number available to send text."}
+        
+    if not message_body or message_body.strip() == "":
+        return {"status": "error", "message": "No message provided to send."}
+        
+    sent = await send_sms(phone, message_body.strip(), logger_or_debug)
+    if sent:
+        return {
+            "status": "success",
+            "sms_sent": True,
+            "message": f"Text message sent successfully to {phone}."
+        }
+    else:
+        return {
+            "status": "sms_failed",
+            "sms_sent": False,
+            "message": (
+                f"SMS_DELIVERY_FAILED: The text message could NOT be delivered to {phone}. "
+                f"Inform the caller that the message could not be texted at this time."
+            )
+        }
+
 
 async def handle_send_link_email(args: dict, logger_or_debug) -> dict:
     """

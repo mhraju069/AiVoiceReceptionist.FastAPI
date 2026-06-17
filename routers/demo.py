@@ -25,6 +25,7 @@ from routers.common_tools import (
     handle_transfer_call,
     handle_end_call,
     handle_send_link_sms,
+    handle_send_custom_sms,
     handle_send_link_email,
     handle_record_message,
 )
@@ -340,6 +341,25 @@ async def demo_voice_stream(websocket: WebSocket):
                                          }
                                     },
                                     "required": ["link_type"]
+                                }
+                            },
+                            {
+                                "type": "function",
+                                "name": "send_custom_sms",
+                                "description": "Send an arbitrary text message (SMS) to the caller. Use this when the caller asks for information like an address, email, or brief text to be sent to their phone.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "message": {
+                                            "type": "string",
+                                            "description": "The exact text message content to send to the user."
+                                        },
+                                        "phone_number": {
+                                            "type": "string",
+                                            "description": "Optional destination phone number. Defaults to the caller's phone."
+                                        }
+                                    },
+                                    "required": ["message"]
                                 }
                             },
                             {
@@ -774,6 +794,13 @@ async def demo_voice_stream(websocket: WebSocket):
 
                         elif func_name == "send_link_sms":
                             result = await handle_send_link_sms(
+                                args=args,
+                                default_phone=phone,
+                                logger_or_debug=_log_adapter
+                            )
+
+                        elif func_name == "send_custom_sms":
+                            result = await handle_send_custom_sms(
                                 args=args,
                                 default_phone=phone,
                                 logger_or_debug=_log_adapter
