@@ -171,7 +171,17 @@ async def get_slots(calendar_type: str = "follow_up_b", timezone: str = OFFICE_T
         if attempt < 3:
             await _asyncio.sleep(1.5 * attempt)  # 1.5s, then 3s backoff
 
-    return {"status": "error", "message": f"Could not load available slots after 3 attempts. Please ask the caller to try again shortly. Detail: {last_error}"}
+    return {
+        "status": "error",
+        "message": (
+            "SYSTEM_UNAVAILABLE: The booking calendar is temporarily offline. "
+            "INSTRUCTION FOR AI: Do NOT mention any technical errors or timeouts. "
+            "Gracefully tell the caller: 'I apologize, but our scheduling system is temporarily offline. "
+            "I have noted your request, and our team will reach out to you shortly to schedule this appointment.' "
+            "Then offer to help with anything else."
+        ),
+        "internal_detail": last_error
+    }
 
 
 
@@ -396,9 +406,12 @@ async def book_appointment(
         if "calendar is disabled" in err_str.lower() or "calendarId" in err_str.lower():
             return {
                 "status": "calendar_disabled",
-                "message": "The booking calendar is currently disabled. Please inform the caller we cannot accept appointments right now.",
+                "message": "SYSTEM_UNAVAILABLE: INSTRUCTION FOR AI: Do NOT mention technical errors or calendar statuses. Say: 'I apologize, but this specific appointment type is currently unavailable for online booking. I have noted your request, and our team will contact you to schedule it manually.'",
             }
-        return {"status": "error", "message": f"Booking failed: {err_str}"}
+        return {
+            "status": "error", 
+            "message": "SYSTEM_UNAVAILABLE: INSTRUCTION FOR AI: Do NOT mention technical errors. Say: 'I apologize, but I am unable to confirm the booking at this moment. Our team will manually process this and contact you shortly.'"
+        }
 
     appointment_id = appointment.get("id", "N/A")
     print(f"📅 [BookingService] Appointment created: {appointment_id}")

@@ -216,7 +216,10 @@ async def handle_book_appointment(args: dict, logger_or_debug) -> dict:
         return result
     except Exception as e:
         await logger_or_debug("tool_error", f"🔴 Booking exception: {e}")
-        return {"status": "error", "message": "Sorry, there was a technical issue booking your appointment. Please try again later."}
+        return {
+            "status": "error", 
+            "message": "SYSTEM_UNAVAILABLE: INSTRUCTION FOR AI: Do NOT mention technical issues. Say: 'I apologize, but I am unable to confirm the booking at this moment. Our team will manually process this and contact you shortly.'"
+        }
 
 
 
@@ -242,7 +245,10 @@ async def handle_get_slots(args: dict, logger_or_debug) -> dict:
         return result
     except Exception as e:
         await logger_or_debug("tool_error", f"🔴 Slot fetch exception: {e}")
-        return {"status": "error", "message": "Could not fetch available slots."}
+        return {
+            "status": "error", 
+            "message": "SYSTEM_UNAVAILABLE: INSTRUCTION FOR AI: Do NOT mention technical errors. Say: 'I apologize, but our scheduling system is temporarily offline. I have noted your request, and our team will reach out to you shortly to schedule this appointment.'"
+        }
 
 async def handle_transfer_call(args: dict, openai_ws, call_done, call_id: str, logger_or_debug) -> dict:
     target = args.get("target", "tanzina").lower()
