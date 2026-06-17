@@ -158,11 +158,7 @@ async def get_slots(calendar_type: str = "follow_up_b", timezone: str = OFFICE_T
                 resp = await client.get(url, params=params, headers=get_ghl_headers())
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Validate response actually has slots
-                    if data:
-                        return {"status": "success", "available_slots": data}
-                    # Empty response — retry
-                    last_error = "GHL returned empty slots data"
+                    return {"status": "success", "available_slots": data if data else {}}
                 else:
                     last_error = f"GHL slots API error (attempt {attempt}): {resp.status_code} {resp.text[:200]}"
         except Exception as e:
