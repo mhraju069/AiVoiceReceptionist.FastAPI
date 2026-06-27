@@ -19,7 +19,21 @@ logging.basicConfig(
 logger = logging.getLogger("airec")
 
 # Create all database tables
-Base.metadata.create_all(bind=engine)
+# In main.py - replace the bare create_all with this:
+import time
+
+def init_db(retries=5, delay=3):
+    for i in range(retries):
+        try:
+            Base.metadata.create_all(bind=engine)
+            logger.info("✅ Database tables created successfully")
+            return
+        except Exception as e:
+            logger.warning(f"⚠️ DB not ready, retrying {i+1}/{retries}... {e}")
+            time.sleep(delay)
+    raise Exception("❌ Could not connect to database after retries")
+
+init_db()  # Replace Base.metadata.create_all(bind=engine)
 
 _refresh_task = None
 

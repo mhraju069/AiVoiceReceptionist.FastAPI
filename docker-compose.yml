@@ -6,6 +6,13 @@ services:
     image: postgres:15-alpine
     container_name: postgres_db
     restart: always
+
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d vocaai" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
@@ -33,7 +40,8 @@ services:
       - ENV=production
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@db:5432/vocaai}
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   # Nginx Reverse Proxy
   nginx:
