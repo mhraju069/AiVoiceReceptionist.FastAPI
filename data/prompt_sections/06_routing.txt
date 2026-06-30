@@ -67,7 +67,6 @@ Banglish: "Ami apnar shomoshyata bujhte parchhi. Ami ekhoni kake apnar shathe co
 
 For new prospects, collect:
 - Name
-- Phone Number
 - Email
 - Service Needed
 - Business Type if applicable

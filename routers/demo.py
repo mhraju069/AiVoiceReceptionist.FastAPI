@@ -177,26 +177,11 @@ async def demo_voice_stream(websocket: WebSocket):
 
                         # LIVE SESSION RULES (OVERRIDE NOTHING — ADD TO ABOVE)
 
-                        ## LANGUAGE LOCK — CRITICAL
-                        - You support EXACTLY TWO languages: English and Banglish (romanized Bangla).
-                        - NEVER output Bengali Unicode characters (e.g. ক খ গ). Always write Bangla in Latin script (Banglish).
-                        - DEFAULT language is ENGLISH. Start in English.
-                        - SWITCH to Banglish ONLY when the caller speaks a FULL Bangla/Banglish sentence. A single word, name, or greeting is NOT enough.
-                        - Once you detect the caller's language (English or Banglish), LOCK to it for the entire call. Never switch back.
-                        - If the caller speaks a third language (Hindi, Gujarati, Spanish, Chinese, etc.) say ONCE: "I am sorry, I only speak English and Bangla. How can I help you?" then continue in English.
-                        - IGNORE transcription noise, foreign hallucinations, or background sounds. Respond only to clear human speech.
+                        ## LANGUAGE LOCK
+                        Your language rules are defined above. Default is English. Lock to the caller's language once detected. Never output Bengali Unicode characters — always use Banglish (Latin script).
 
-                        ## CALL ENDING — 2-STEP ONLY
-                        STEP 1: After completing a task, ask ONCE if they need more help:
-                          English: "Is there anything else I can help you with today?"
-                          Banglish: "Ar kono help lagbe apnar?"
-                        STEP 2: If they say NO (no, nah, na, na dhonnobad, that's all, ar lagbe na, nothing else, thanks):
-                          Say a warm SHORT goodbye in the SAME language, then call end_call immediately.
-                          English goodbye: "Thank you for calling Pay Minimum Tax! Have a great day. Goodbye!"
-                          Banglish goodbye: "Dhonnobad, Pay Minimum Tax-e call korar jonno. Bhalo thakben. Khoda Hafez!"
-                        If they say YES or have more (yes, haan, acha, bolun, ektu, wait, one more):
-                          Say "Of course, go ahead!" or "Ji bolun!" and continue. Do NOT call end_call.
-                        CRITICAL: Do NOT ask "Can I end the call?" or "Ami ki call shesh kore dii?" — this extra permission step is REMOVED.
+                        ## CALL ENDING
+                        Follow the 2-step call ending flow defined in your instructions above: ask once if the caller needs anything else, then say a warm goodbye and call end_call immediately on a negative response. Do NOT ask "Can I end the call?" — that permission step is removed.
 
                         ## NO REPETITIVE QUESTIONS
                         - The caller's phone number is ALREADY KNOWN: {phone}. NEVER ask for it again.
@@ -295,7 +280,7 @@ async def demo_voice_stream(websocket: WebSocket):
                             {
                                 "type": "function",
                                 "name": "end_call",
-                                "description": "End the demo session. ONLY call this AFTER you have explicitly asked the user for permission to end the call (e.g. 'Can I end the call now?') AND they have said YES. Never use this just because they say goodbye.",
+                                "description": "End the call. Call this after the caller responds negatively to 'Is there anything else I can help you with?' — say a warm goodbye first, then call this tool immediately. Do NOT ask for separate permission to end the call. Do NOT say 'Can I end the call?' — that step is removed.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
