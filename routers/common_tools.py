@@ -225,23 +225,22 @@ async def handle_book_appointment(args: dict, logger_or_debug) -> dict:
 
 async def handle_get_slots(args: dict, logger_or_debug) -> dict:
     try:
-        # # ── Step 1: Determine live office status ──────────────────────────────
-        # office_ctx = get_office_status_context()
-        # await logger_or_debug("office_status", f"🏢 Office status: {office_ctx['office_status']}")
+        # ── Step 1: Determine live office status ──────────────────────────────
+        office_ctx = get_office_status_context()
+        await logger_or_debug("office_status", f"🏢 Office status: {office_ctx['office_status']}")
 
         # ── Step 2: Fetch available slots from GHL ────────────────────────────
         result = await get_slots(
             calendar_type=args.get("calendar_type", "follow_up_b")
         )
 
-        # # ── Step 3: Inject office context so AI knows the status before speaking
-        # result["office_open"]   = office_ctx["office_open"]
-        # result["office_status"] = office_ctx["office_status"]
-        # result["office_note"]   = office_ctx["english_note"]
-        # result["banglish_note"] = office_ctx["banglish_note"]
+        # ── Step 3: Inject office context so AI knows the status before speaking
+        result["office_open"]   = office_ctx["office_open"]
+        result["office_status"] = office_ctx["office_status"]
+        result["office_note"]   = office_ctx["english_note"]
+        result["banglish_note"] = office_ctx["banglish_note"]
 
-        # await logger_or_debug("tool_result", f"✅ Slots fetched. Office: {office_ctx['office_status']}")
-        await logger_or_debug("tool_result", "✅ Slots fetched successfully.")
+        await logger_or_debug("tool_result", f"✅ Slots fetched. Office: {office_ctx['office_status']}")
         return result
     except Exception as e:
         await logger_or_debug("tool_error", f"🔴 Slot fetch exception: {e}")
@@ -250,7 +249,14 @@ async def handle_get_slots(args: dict, logger_or_debug) -> dict:
             "message": "SYSTEM_UNAVAILABLE: INSTRUCTION FOR AI: Do NOT mention technical errors. Say: 'I apologize, but our scheduling system is temporarily offline. I have noted your request, and our team will reach out to you shortly to schedule this appointment.'"
         }
 
-async def handle_transfer_call(args: dict, openai_ws, call_done, call_id: str, logger_or_debug) -> dict:
+async def handle_transfer_call(
+    args: dict,
+    openai_ws,
+    call_done,
+    call_id: str,
+    logger_or_debug,
+    redirect_fn=None   # Optional async callable(target_name: str): performs real Twilio redirect
+) -> dict:
     target = args.get("target", "tanzina").lower()
     
     if not is_office_open():
@@ -327,8 +333,24 @@ async def handle_transfer_call(args: dict, openai_ws, call_done, call_id: str, l
             }
         }))
     
-    asyncio.create_task(_simulated_transfer_flow())
-    
+    if redirect_fn:
+        # ── Real Twilio transfer: wait for hold message to play, then redirect via REST ──
+        async def _real_transfer_flow():
+            await asyncio.sleep(4)  # Allow hold message audio to finish before redirect
+            if call_done.is_set():
+                return
+            try:
+                await redirect_fn(target)
+                await logger_or_debug("transfer_redirect", f"📲 [Transfer] Call redirected to {target} via Twilio REST.")
+                call_done.set()  # End the WebSocket — Twilio now owns the call via /forward-call
+            except Exception as e:
+                await logger_or_debug("transfer_error", f"❌ [Transfer] Redirect failed: {e}. Falling back to simulated flow.")
+                asyncio.create_task(_simulated_transfer_flow())
+
+        asyncio.create_task(_real_transfer_flow())
+    else:
+        asyncio.create_task(_simulated_transfer_flow())
+
     return {"status": "success", "message": f"Transferring to {target}"}
 
 async def handle_end_call(

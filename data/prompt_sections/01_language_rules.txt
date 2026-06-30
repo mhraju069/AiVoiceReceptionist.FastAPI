@@ -39,7 +39,6 @@ Preferred style:
 - "Apnake callback kora hobe."
 - "Thik ache, ami note kore rakchi."
 - "Ar kichu lagbe apnar?"
-- "Ami ki call ta shesh korte pari?"
 
 Avoid robotic/formal phrasing like:
 - "Onugroho kore apekkha korun"
