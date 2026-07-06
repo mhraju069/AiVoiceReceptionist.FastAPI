@@ -1,17 +1,30 @@
 from database import engine
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 
 def migrate():
     with engine.connect() as conn:
         print("🔍 Checking columns in call_logs...")
         try:
-            # Add 'reason' column
-            conn.execute(text("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS reason VARCHAR;"))
-            print("✅ Added 'reason' column.")
+            inspector = inspect(engine)
+            if not inspector.has_table("call_logs"):
+                print("ℹ️ Table 'call_logs' does not exist yet. It will be created automatically on application startup.")
+                return
+
+            columns = [col['name'] for col in inspector.get_columns('call_logs')]
             
-            # Add 'duration' column
-            conn.execute(text("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS duration INTEGER;"))
-            print("✅ Added 'duration' column.")
+            # Check and add 'reason' column
+            if 'reason' not in columns:
+                conn.execute(text("ALTER TABLE call_logs ADD COLUMN reason VARCHAR;"))
+                print("✅ Added 'reason' column.")
+            else:
+                print("ℹ️ Column 'reason' already exists.")
+            
+            # Check and add 'duration' column
+            if 'duration' not in columns:
+                conn.execute(text("ALTER TABLE call_logs ADD COLUMN duration INTEGER;"))
+                print("✅ Added 'duration' column.")
+            else:
+                print("ℹ️ Column 'duration' already exists.")
             
             conn.commit()
             print("🚀 Migration completed successfully!")

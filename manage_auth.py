@@ -1,26 +1,38 @@
 import os
-from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.orm import sessionmaker
 from database import Base
 from models.auth_models import User
 from utils.auth_utils import get_password_hash
+
+# Load environment variables
+load_dotenv()
 
 def main():
     print("==========================================")
     print("   Pay Minimum Tax CLI Authentication Manager")
     print("==========================================")
 
-    db_urls = [
-        "postgresql://postgres:postgres@localhost:5432/vocaai",
-        "postgresql://postgres:postgres@db:5432/vocaai"
-    ]
+    env_db_url = os.getenv("DATABASE_URL")
+    db_urls = []
+    if env_db_url:
+        db_urls.append(env_db_url)
+    else:
+        db_urls.extend([
+            "postgresql://postgres:postgres@localhost:5432/vocaai",
+            "postgresql://postgres:postgres@db:5432/vocaai"
+        ])
 
     engine = None
     last_error = None
     
     for url in db_urls:
         try:
-            test_engine = create_engine(url)
+            connect_args = {}
+            if url.startswith("sqlite"):
+                connect_args["check_same_thread"] = False
+            test_engine = create_engine(url, connect_args=connect_args)
             with test_engine.connect() as conn:
                 pass
             engine = test_engine
@@ -30,22 +42,29 @@ def main():
             continue
 
     if not engine:
-        print("\nError: Could not connect to the PostgreSQL database.")
+        print("\nError: Could not connect to the database.")
         print(f"Details of the error: {last_error}")
         print("\nPlease ensure that:")
-        print("1. Your PostgreSQL Docker container is running.")
-        print("2. You have 'psycopg2' or 'psycopg2-binary' installed on your local host Python.")
-        print("   To install it, run: pip install psycopg2-binary\n")
+        print("1. Your database (PostgreSQL/SQLite) is properly configured.")
+        print("2. If using PostgreSQL, verify your Docker container or server is running.")
+        print("3. Check the DATABASE_URL environment variable in your .env file.\n")
         return
 
-    # Automatically add missing columns if using psql
+    # Automatically add missing columns dynamically
     with engine.connect() as conn:
         try:
-            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS otp VARCHAR;"))
-            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_expires_at TIMESTAMP;"))
-            conn.commit()
-        except Exception:
-            pass
+            inspector = inspect(engine)
+            if inspector.has_table("users"):
+                columns = [col['name'] for col in inspector.get_columns('users')]
+                if 'otp' not in columns:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN otp VARCHAR;"))
+                    print("✅ Added 'otp' column to users table.")
+                if 'otp_expires_at' not in columns:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN otp_expires_at TIMESTAMP;"))
+                    print("✅ Added 'otp_expires_at' column to users table.")
+                conn.commit()
+        except Exception as e:
+            print(f"⚠️ Warning updating users schema: {e}")
 
     # Create all tables if they do not exist
     Base.metadata.create_all(bind=engine)
